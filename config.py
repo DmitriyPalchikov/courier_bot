@@ -120,10 +120,11 @@ MIN_BOXES = 1
 MAX_BOXES = 999
 
 # Список администраторов бота (Telegram ID)
-ADMIN_IDS = [
-    123456789,  # Замените на ваш Telegram ID
-    987654321   # ID другого администратора если есть
-]
+admin_ids_str = os.getenv('ADMIN_IDS', '')
+if admin_ids_str:
+    ADMIN_IDS = [int(id.strip()) for id in admin_ids_str.split(',') if id.strip().isdigit()]
+else:
+    ADMIN_IDS = [1066894931,421576269]
 
 # =============================================================================
 # ТЕКСТОВЫЕ СООБЩЕНИЯ

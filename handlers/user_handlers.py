@@ -166,14 +166,9 @@ async def city_selected(callback: CallbackQuery, state: FSMContext) -> None:
     """
     Обработчик выбора города для маршрута.
     
-    После выбора города показывает точки маршрута и переводит
-    в режим прохождения маршрута.
-    
-    Args:
-        callback: Объект callback query от inline кнопки
-        state: Контекст состояния FSM
+    Показывает информацию о маршруте и запрашивает подтверждение.
     """
-    # Извлекаем название города из callback_data
+    # Приводим callback.data к строке
     raw_data = callback.data
     if isinstance(raw_data, (list, tuple)):
         raw_data = raw_data[0]
@@ -184,32 +179,80 @@ async def city_selected(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("❌ Неизвестный город", show_alert=True)
         return
     
-    # Сохраняем выбранный город в контексте состояния
-    await state.update_data(selected_city=city_name, current_point_index=0)
-    
     # Получаем точки маршрута для выбранного города
     route_points = AVAILABLE_ROUTES[city_name]
     
+    # Сохраняем выбранный город и маршрут
+    await state.update_data(
+        selected_city=city_name,
+        route_points=route_points,
+        current_point_index=0,
+        collected_boxes={}
+    )
+    
+    # Переводим в состояние ожидания подтверждения
+    await state.set_state(RouteStates.waiting_for_route_confirmation)
+    
+    # Формируем информацию о маршруте
+    route_info = f"📍 <b>Выбранный маршрут: {city_name}</b>\n\n"
+    route_info += f"📋 <b>Точки для посещения ({len(route_points)}):</b>\n"
+    
+    for i, point in enumerate(route_points, 1):
+        route_info += f"{i}. <b>{point['organization']}</b> - {point['name']}\n"
+        route_info += f"   📍 {point['address']}\n\n"
+    
+    route_info += "❓ <b>Подтвердите выбор маршрута:</b>"
+    
+    # Создаём клавиатуру подтверждения
+    from keyboards.user_keyboards import get_confirmation_keyboard
+    
+    await callback.message.edit_text(
+        text=route_info,
+        reply_markup=get_confirmation_keyboard(
+            confirm_text="✅ Начать маршрут",
+            cancel_text="❌ Выбрать другой город",
+            confirm_callback="confirm_route_start",
+            cancel_callback="back_to_city_selection"
+        )
+    )
+    
+    await callback.answer()
+
+@user_router.callback_query(F.data == "confirm_route_start", RouteStates.waiting_for_route_confirmation)
+async def confirm_route_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Подтверждение начала маршрута.
+    
+    Переходит к первой точке маршрута.
+    """
+    state_data = await state.get_data()
+    selected_city = state_data.get('selected_city')
+    route_points = state_data.get('route_points')
+    
+    if not route_points:
+        await callback.answer("❌ Ошибка: маршрут не найден", show_alert=True)
+        await state.clear()
+        return
+    
     # Начинаем с первой точки маршрута
     current_point = route_points[0]
-
-    # Сохраняем информацию о текущей точке
+    
+    # Обновляем данные состояния
     await state.update_data(
         current_point=current_point,
-        total_points=len(route_points),
-        collected_boxes={}  # Словарь для хранения собранных коробок по организациям
+        total_points=len(route_points)
     )
-
+    
     # Переводим в состояние ожидания фотографии
     await state.set_state(RouteStates.waiting_for_photo)
-
-    # Формируем сообщение о текущей точке
+    
+    # Формируем сообщение о первой точке
     point_info = (
-        f"📍 <b>Маршрут: {city_name}</b>\n\n"
-        f"🏢 <b>Точка 1 из {len(route_points)}</b>\n"
-        f"📋 <b>Организация:</b> {current_point['organization']}\n"
+        f"🚀 <b>Маршрут {selected_city} начат!</b>\n\n"
+        f"📍 <b>Точка 1 из {len(route_points)}</b>\n"
+        f"🏢 <b>Организация:</b> {current_point['organization']}\n"
         f"🏠 <b>Адрес:</b> {current_point['address']}\n\n"
-        f"📸 Сделайте фотографию в данной точке"
+        f"📸 <b>Сделайте фотографию в данной точке</b>"
     )
     
     await callback.message.edit_text(
@@ -217,8 +260,136 @@ async def city_selected(callback: CallbackQuery, state: FSMContext) -> None:
         reply_markup=None
     )
     
+    await callback.answer("Маршрут начат!")
+
+
+@user_router.callback_query(F.data == "back_to_city_selection", RouteStates.waiting_for_route_confirmation)
+async def back_to_city_selection(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Возврат к выбору города.
+    
+    Отменяет текущий выбор и показывает список городов снова.
+    """
+    # Возвращаемся к состоянию выбора города
+    await state.set_state(RouteStates.waiting_for_city_selection)
+    
+    # Очищаем данные выбранного маршрута
+    await state.update_data(
+        selected_city=None,
+        route_points=None,
+        current_point=None
+    )
+    
+    await callback.message.edit_text(
+        text="🏙️ Выберите город для маршрута:",
+        reply_markup=get_cities_keyboard()
+    )
+    
+    await callback.answer("Выбор отменён")
+
+
+@user_router.callback_query(F.data == "cancel_city_selection")
+async def cancel_city_selection(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик отмены выбора города.
+    
+    Очищает состояние FSM и возвращает пользователя в главное меню.
+    
+    Args:
+        callback: Объект callback query от кнопки отмены
+        state: Контекст состояния FSM
+    """
+    # Очищаем все состояния FSM
+    await state.clear()
+    
+    # Редактируем сообщение БЕЗ клавиатуры
+    await callback.message.edit_text(
+        text="❌ Выбор маршрута отменён.",
+        reply_markup=None
+    )
+    
+    # Отправляем новое сообщение с Reply-клавиатурой
+    await callback.message.answer(
+        text="Выберите действие:",
+        reply_markup=get_main_menu_keyboard()
+    )
+    
+    await callback.answer("Выбор маршрута отменён")
+
+
+
+@user_router.callback_query(F.data == "cancel_route")
+async def cancel_route(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик отмены активного маршрута.
+    
+    Показывает подтверждение отмены маршрута.
+    
+    Args:
+        callback: Объект callback query от кнопки отмены маршрута
+        state: Контекст состояния FSM
+    """
+    await callback.message.edit_text(
+        text="⚠️ <b>Вы действительно хотите отменить текущий маршрут?</b>\n\n"
+             "Весь прогресс будет потерян!",
+        reply_markup=get_confirmation_keyboard(
+            confirm_text="✅ Да, отменить",
+            cancel_text="❌ Продолжить маршрут", 
+            confirm_callback="confirm_cancel_route",
+            cancel_callback="back_to_route"
+        )
+    )
+    
     await callback.answer()
 
+
+@user_router.callback_query(F.data == "confirm_cancel_route")
+async def confirm_cancel_route(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Подтверждение отмены маршрута.
+    """
+    # Очищаем состояние
+    await state.clear()
+    
+    await callback.message.edit_text(
+        text="✅ Маршрут отменён.",
+        reply_markup=get_main_menu_keyboard()
+    )
+    
+    await callback.answer("Маршрут отменён")
+
+@user_router.callback_query(F.data == "back_to_route")
+async def back_to_route(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Возврат к активному маршруту.
+    """
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    
+    if current_point:
+        point_info = (
+            f"📍 <b>Текущая точка маршрута:</b>\n\n"
+            f"🏢 <b>Организация:</b> {current_point['organization']}\n"
+            f"🏠 <b>Адрес:</b> {current_point['address']}\n\n"
+            f"📸 Сделайте фотографию в данной точке"
+        )
+        
+        await callback.message.edit_text(
+            text=point_info,
+            reply_markup=None
+        )
+    else:
+        await callback.message.edit_text(
+            text="❌ Активный маршрут не найден",
+            reply_markup=None
+        )
+        
+        await callback.message.answer(
+            text="🏠 Главное меню:",
+            reply_markup=get_main_menu_keyboard()
+        )
+    
+    await callback.answer()
 
 @user_router.message(F.photo, RouteStates.waiting_for_photo)
 async def photo_received(message: Message, state: FSMContext) -> None:

@@ -90,3 +90,26 @@ class GeneralStates(StatesGroup):
     
     # Обработка ошибки, ожидание повторной попытки
     waiting_for_retry = State()
+
+class RouteStates(StatesGroup):
+    """
+    Группа состояний для работы с маршрутами.
+    """
+    
+    # Ожидание выбора города для маршрута
+    waiting_for_city_selection = State()
+    
+    # Ожидание подтверждения выбранного маршрута
+    waiting_for_route_confirmation = State()  # ← НОВОЕ СОСТОЯНИЕ
+    
+    # Маршрут активен, ожидаем фотографию с текущей точки
+    waiting_for_photo = State()
+    
+    # Фотография получена, ожидаем количество коробок
+    waiting_for_boxes_count = State()
+    
+    # Ожидание подтверждения перехода к следующей точке
+    waiting_for_next_point_confirmation = State()
+    
+    # Все точки маршрута пройдены, ожидаем завершения
+    waiting_for_route_completion = State()
