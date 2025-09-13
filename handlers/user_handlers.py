@@ -594,6 +594,45 @@ async def containers_count_received(message: Message, state: FSMContext, bot: Bo
     total_points = state_data.get('total_points', 0)
     collected_containers = state_data.get('collected_containers', {})
     
+    # Сохраняем количество контейнеров в состоянии и переходим к комментарию
+    await state.update_data(containers_count=containers_count)
+    await state.set_state(RouteStates.waiting_for_comment)
+    
+    await message.answer(
+        f"✅ Количество контейнеров: {containers_count}\n\n"
+        f"📝 Напишите короткий комментарий к этой точке маршрута:"
+    )
+
+
+@user_router.message(F.text, RouteStates.waiting_for_comment)
+async def comment_received(message: Message, state: FSMContext, bot: Bot) -> None:
+    """
+    Обработчик получения комментария к точке маршрута.
+    
+    Сохраняет всю информацию о точке в базу данных и переходит к следующей точке.
+    
+    Args:
+        message: Объект сообщения с комментарием
+        state: Контекст состояния FSM  
+        bot: Объект бота для отправки сообщений
+    """
+    comment = message.text.strip()
+    
+    # Проверяем длину комментария
+    if len(comment) > 500:
+        await message.answer("❌ Комментарий слишком длинный. Максимальная длина: 500 символов")
+        return
+    
+    # Получаем данные состояния
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    photos_list = state_data.get('photos_list', [])
+    selected_city = state_data.get('selected_city')
+    current_point_index = state_data.get('current_point_index', 0)
+    total_points = state_data.get('total_points', 0)
+    collected_containers = state_data.get('collected_containers', {})
+    containers_count = state_data.get('containers_count', 0)
+    
     # Сохраняем прогресс в базу данных
     async for session in get_session():
         # Находим или создаём запись маршрута в БД
@@ -628,6 +667,7 @@ async def containers_count_received(message: Message, state: FSMContext, bot: Bo
             user_id=message.from_user.id,
             route_id=route_record.id,
             containers_count=containers_count,
+            notes=comment,
             status='completed'
         )
         session.add(progress)
@@ -673,7 +713,7 @@ async def containers_count_received(message: Message, state: FSMContext, bot: Bo
             current_index=next_point_index,
             collected_containers=collected_containers
         )
-        point_info = f"✅ Точка завершена! Собрано контейнеров: {containers_count}, фото: {len(photos_list)}\n\n{point_info}\n\n📸 Сделайте фотографию в данной точке"
+        point_info = f"✅ Точка завершена! Собрано контейнеров: {containers_count}, фото: {len(photos_list)}\n💬 Комментарий: {comment}\n\n{point_info}\n\n📸 Сделайте фотографию в данной точке"
         
         await message.answer(point_info)
         
@@ -853,6 +893,8 @@ async def unknown_message(message: Message, state: FSMContext) -> None:
         await message.answer("📸 Отправьте фотографию или воспользуйтесь кнопками выше")
     elif current_state == RouteStates.waiting_for_containers_count:
         await message.answer(ERROR_MESSAGES['invalid_containers_count'])
+    elif current_state == RouteStates.waiting_for_comment:
+        await message.answer("📝 Напишите короткий комментарий к этой точке маршрута (максимум 500 символов)")
     else:
         await message.answer(
             "🤔 Я не понимаю это сообщение. Используйте кнопки меню или команды.",
