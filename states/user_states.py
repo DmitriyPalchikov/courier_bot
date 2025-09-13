@@ -39,6 +39,9 @@ class RouteStates(StatesGroup):
     # Фотографии готовы, ожидаем количество контейнеров
     waiting_for_containers_count = State()
     
+    # Контейнеры указаны, ожидаем комментарий к точке
+    waiting_for_comment = State()
+    
     # Ожидание подтверждения перехода к следующей точке
     waiting_for_next_point_confirmation = State()
     
