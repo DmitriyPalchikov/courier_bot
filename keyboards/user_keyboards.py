@@ -322,3 +322,60 @@ def get_navigation_keyboard(has_prev: bool = False, has_next: bool = False) -> I
         builder.adjust(1)  # Все кнопки отдельно
     
     return builder.as_markup()
+
+
+def get_photo_actions_keyboard() -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для действий с фотографией.
+    
+    Показывается после получения первой фотографии с точки маршрута.
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками добавления фото и продолжения
+    """
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(
+        InlineKeyboardButton(
+            text="📸 Добавить еще фото",
+            callback_data="add_more_photos"
+        ),
+        InlineKeyboardButton(
+            text="📦 Указать количество контейнеров",
+            callback_data="proceed_to_boxes"
+        )
+    )
+    
+    # Размещаем кнопки по одной в ряду
+    builder.adjust(1)
+    
+    return builder.as_markup()
+
+
+def get_finish_photos_keyboard(photos_count: int) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для завершения добавления фотографий.
+    
+    Args:
+        photos_count: Количество уже добавленных фотографий
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками завершения и добавления
+    """
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(
+        InlineKeyboardButton(
+            text=f"✅ Готово ({photos_count} фото)",
+            callback_data="finish_photos"
+        ),
+        InlineKeyboardButton(
+            text="📸 Добавить еще",
+            callback_data="add_one_more_photo"
+        )
+    )
+    
+    # Размещаем кнопки по одной в ряду
+    builder.adjust(1)
+    
+    return builder.as_markup()

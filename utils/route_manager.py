@@ -39,7 +39,7 @@ class RouteStats:
     """Класс для статистики маршрута."""
     total_points: int
     completed_points: int
-    total_boxes: int
+    total_containers: int
     organizations: List[str]
     completion_percentage: float
     estimated_completion_time: Optional[datetime] = None
@@ -228,7 +228,7 @@ class RouteManager:
                 return RouteStats(
                     total_points=0,
                     completed_points=0,
-                    total_boxes=0,
+                    total_containers=0,
                     organizations=[],
                     completion_percentage=0.0
                 )
@@ -236,14 +236,14 @@ class RouteManager:
             # Подсчитываем статистику
             total_points = len(progresses_list)
             completed_points = len([p for p in progresses_list if p.status == 'completed'])
-            total_boxes = sum(p.boxes_count for p in progresses_list)
+            total_containers = sum(p.containers_count for p in progresses_list)
             organizations = list(set(p.route.organization for p in progresses_list))
             completion_percentage = (completed_points / total_points * 100) if total_points > 0 else 0
             
             return RouteStats(
                 total_points=total_points,
                 completed_points=completed_points,
-                total_boxes=total_boxes,
+                total_containers=total_containers,
                 organizations=organizations,
                 completion_percentage=completion_percentage
             )
@@ -269,7 +269,7 @@ class RouteManager:
             if not deliveries_list:
                 return {
                     'total_deliveries': 0,
-                    'total_boxes': 0,
+                    'total_containers': 0,
                     'organizations': {},
                     'estimated_trips': 0,
                     'priority_deliveries': []
@@ -277,35 +277,35 @@ class RouteManager:
             
             # Группируем по организациям
             organizations_summary = {}
-            total_boxes = 0
+            total_containers = 0
             
             for delivery in deliveries_list:
                 org = delivery.organization
                 if org not in organizations_summary:
                     organizations_summary[org] = {
-                        'total_boxes': 0,
+                        'total_containers': 0,
                         'deliveries_count': 0,
                         'address': MOSCOW_DELIVERY_ADDRESSES.get(org, {}).get('address', 'Не указан'),
                         'contact': MOSCOW_DELIVERY_ADDRESSES.get(org, {}).get('contact', 'Не указан'),
                         'working_hours': MOSCOW_DELIVERY_ADDRESSES.get(org, {}).get('working_hours', 'Не указано')
                     }
                 
-                organizations_summary[org]['total_boxes'] += delivery.total_boxes
+                organizations_summary[org]['total_containers'] += delivery.total_containers
                 organizations_summary[org]['deliveries_count'] += 1
-                total_boxes += delivery.total_boxes
+                total_containers += delivery.total_containers
             
             # Оцениваем количество необходимых поездок (условно 50 коробок за поездку)
-            estimated_trips = max(1, (total_boxes + 49) // 50)
+            estimated_trips = max(1, (total_containers + 49) // 50)
             
             # Определяем приоритетные доставки (большие объёмы)
             priority_deliveries = [
                 org for org, data in organizations_summary.items() 
-                if data['total_boxes'] >= 20
+                if data['total_containers'] >= 20
             ]
             
             return {
                 'total_deliveries': len(deliveries_list),
-                'total_boxes': total_boxes,
+                'total_containers': total_containers,
                 'organizations': organizations_summary,
                 'estimated_trips': estimated_trips,
                 'priority_deliveries': priority_deliveries,

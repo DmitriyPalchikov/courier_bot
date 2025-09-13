@@ -1,120 +1,210 @@
 """
-Клавиатуры для административной панели курьерского бота.
+Клавиатуры для административных функций бота.
 
-Содержит функции для создания специализированных клавиатур
-для администраторов системы.
+Этот модуль содержит функции для создания клавиатур,
+используемых в административном интерфейсе бота.
 """
 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
+from typing import List, Optional
 
 
-def get_admin_menu_keyboard() -> InlineKeyboardMarkup:
+def get_admin_menu_keyboard() -> ReplyKeyboardMarkup:
     """
-    Создаёт главную клавиатуру административной панели.
+    Создает основное меню администратора.
     
     Returns:
-        InlineKeyboardMarkup: Клавиатура админ-панели
+        ReplyKeyboardMarkup с кнопками админ-меню
     """
-    builder = InlineKeyboardBuilder()
-    
-    builder.add(
-        InlineKeyboardButton(
-            text="📊 Статистика",
-            callback_data="admin_statistics"
-        ),
-        InlineKeyboardButton(
-            text="🚚 Доставки в Москву",
-            callback_data="admin_deliveries"
-        ),
-        InlineKeyboardButton(
-            text="👥 Пользователи",
-            callback_data="admin_users"
-        ),
-        InlineKeyboardButton(
-            text="📋 Активные маршруты",
-            callback_data="admin_active_routes"
-        ),
-        InlineKeyboardButton(
-            text="⚙️ Настройки",
-            callback_data="admin_settings"
-        ),
-        InlineKeyboardButton(
-            text="🏠 В главное меню",
-            callback_data="main_menu"
-        )
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📊 Статистика"),
+                KeyboardButton(text="📋 Активные доставки")
+            ],
+            [
+                KeyboardButton(text="📥 Экспорт отчетов"),
+                KeyboardButton(text="⚙️ Настройки")
+            ],
+            [
+                KeyboardButton(text="🏠 Главное меню")
+            ]
+        ],
+        resize_keyboard=True
     )
-    
-    builder.adjust(2, 2, 1, 1)
-    
-    return builder.as_markup()
+    return keyboard
 
 
 def get_statistics_keyboard() -> InlineKeyboardMarkup:
     """
-    Клавиатура для раздела статистики.
+    Создает клавиатуру для меню статистики.
     
     Returns:
-        InlineKeyboardMarkup: Клавиатура статистики
+        InlineKeyboardMarkup с кнопками статистики
     """
-    builder = InlineKeyboardBuilder()
-    
-    builder.add(
-        InlineKeyboardButton(
-            text="📈 Детальная статистика",
-            callback_data="detailed_stats"
-        ),
-        InlineKeyboardButton(
-            text="📅 За период",
-            callback_data="period_stats"
-        ),
-        InlineKeyboardButton(
-            text="🔄 Обновить",
-            callback_data="admin_statistics"
-        ),
-        InlineKeyboardButton(
-            text="⬅️ Назад",
-            callback_data="admin_menu"
-        )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📈 Общая статистика",
+                    callback_data="stats_general"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👥 Статистика курьеров",
+                    callback_data="stats_couriers"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 За сегодня",
+                    callback_data="stats_today"
+                ),
+                InlineKeyboardButton(
+                    text="📅 За неделю",
+                    callback_data="stats_week"
+                ),
+                InlineKeyboardButton(
+                    text="📅 За месяц",
+                    callback_data="stats_month"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить",
+                    callback_data="stats_refresh"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Закрыть",
+                    callback_data="stats_close"
+                )
+            ]
+        ]
     )
-    
-    builder.adjust(2, 1, 1)
-    
-    return builder.as_markup()
+    return keyboard
 
 
-def get_deliveries_keyboard() -> InlineKeyboardMarkup:
+def get_export_keyboard() -> InlineKeyboardMarkup:
     """
-    Клавиатура для управления доставками.
+    Создает клавиатуру для меню экспорта отчетов.
     
     Returns:
-        InlineKeyboardMarkup: Клавиатура доставок
+        InlineKeyboardMarkup с кнопками экспорта
     """
-    builder = InlineKeyboardBuilder()
-    
-    builder.add(
-        InlineKeyboardButton(
-            text="✅ Подтвердить доставки",
-            callback_data="confirm_deliveries"
-        ),
-        InlineKeyboardButton(
-            text="🖨️ Печать маршрутного листа",
-            callback_data="print_route_list"
-        ),
-        InlineKeyboardButton(
-            text="📋 История доставок",
-            callback_data="delivery_history"
-        ),
-        InlineKeyboardButton(
-            text="🔄 Обновить список",
-            callback_data="admin_deliveries"
-        ),
-        InlineKeyboardButton(
-            text="⬅️ Назад",
-            callback_data="admin_menu"
-        )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📊 Excel отчет",
+                    callback_data="export_excel"
+                ),
+                InlineKeyboardButton(
+                    text="📄 PDF отчет",
+                    callback_data="export_pdf"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 Выбрать период",
+                    callback_data="export_select_period"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Закрыть",
+                    callback_data="export_close"
+                )
+            ]
+        ]
     )
+    return keyboard
+
+
+def get_settings_keyboard() -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для меню настроек.
     
-    builder.adjust(1, 1, 1, 1, 1)
+    Returns:
+        InlineKeyboardMarkup с кнопками настроек
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👥 Управление курьерами",
+                    callback_data="settings_couriers"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🛣 Управление маршрутами",
+                    callback_data="settings_routes"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Резервное копирование",
+                    callback_data="settings_backup"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Закрыть",
+                    callback_data="settings_close"
+                )
+            ]
+        ]
+    )
+    return keyboard
+
+
+def get_period_selection_keyboard() -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для выбора периода отчета.
     
-    return builder.as_markup()
+    Returns:
+        InlineKeyboardMarkup с кнопками выбора периода
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📅 Сегодня",
+                    callback_data="period_today"
+                ),
+                InlineKeyboardButton(
+                    text="📅 Вчера",
+                    callback_data="period_yesterday"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 Неделя",
+                    callback_data="period_week"
+                ),
+                InlineKeyboardButton(
+                    text="📅 Месяц",
+                    callback_data="period_month"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 Выбрать даты",
+                    callback_data="period_custom"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="period_cancel"
+                )
+            ]
+        ]
+    )
+    return keyboard

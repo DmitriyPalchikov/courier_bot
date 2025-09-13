@@ -56,8 +56,17 @@ async def main():
         
         # Инициализируем базу данных (создаём таблицы если их нет)
         logger.info("Инициализация базы данных...")
-        await init_db()
-        logger.info("База данных успешно инициализирована")
+        try:
+            await init_db()
+            logger.info("База данных успешно инициализирована")
+        except Exception as db_error:
+            logger.error(f"Ошибка инициализации БД: {db_error}")
+            logger.info("Попытка пересоздать базу данных...")
+            import os
+            if os.path.exists("courier_bot.db"):
+                os.remove("courier_bot.db")
+            await init_db()
+            logger.info("База данных пересоздана успешно")
         
         # Подключаем роутеры в правильном порядке (важно!)
         # Роутер администратора должен быть первым для приоритета

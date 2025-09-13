@@ -8,12 +8,13 @@
 Основные группы обработчиков:
 - Команды бота (/start, /help)
 - Выбор и прохождение маршрутов
-- Загрузка фотографий и подсчёт коробок
+- Загрузка фотографий и подсчёт контейнеров
 - Завершение маршрутов
 """
 
 import logging
 from typing import Optional, List
+from datetime import datetime, timedelta
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, PhotoSize
 from aiogram.filters import Command, StateFilter
@@ -21,16 +22,20 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy import select, and_
 from sqlalchemy.orm import selectinload
 
+from utils.progress_bar import format_route_progress, format_route_summary
+
 # Импорты наших модулей
 from database.database import get_session
-from database.models import User, Route, RouteProgress, Delivery
+from database.models import User, Route, RouteProgress, Delivery, RoutePhoto
 from states.user_states import RouteStates
 from keyboards.user_keyboards import (
     get_main_menu_keyboard,
     get_cities_keyboard, 
     get_route_points_keyboard,
     get_confirmation_keyboard,
-    get_complete_route_keyboard
+    get_complete_route_keyboard,
+    get_photo_actions_keyboard,
+    get_finish_photos_keyboard
 )
 from config import (
     WELCOME_MESSAGE,
@@ -38,8 +43,8 @@ from config import (
     ERROR_MESSAGES,
     AVAILABLE_ROUTES,
     MOSCOW_DELIVERY_ADDRESSES,
-    MIN_BOXES,
-    MAX_BOXES
+    MIN_CONTAINERS,
+    MAX_CONTAINERS
 )
 from utils.route_manager import RouteManager
 
@@ -187,7 +192,7 @@ async def city_selected(callback: CallbackQuery, state: FSMContext) -> None:
         selected_city=city_name,
         route_points=route_points,
         current_point_index=0,
-        collected_boxes={}
+        collected_containers={}
     )
     
     # Переводим в состояние ожидания подтверждения
@@ -246,14 +251,18 @@ async def confirm_route_start(callback: CallbackQuery, state: FSMContext) -> Non
     # Переводим в состояние ожидания фотографии
     await state.set_state(RouteStates.waiting_for_photo)
     
-    # Формируем сообщение о первой точке
-    point_info = (
-        f"🚀 <b>Маршрут {selected_city} начат!</b>\n\n"
-        f"📍 <b>Точка 1 из {len(route_points)}</b>\n"
-        f"🏢 <b>Организация:</b> {current_point['organization']}\n"
-        f"🏠 <b>Адрес:</b> {current_point['address']}\n\n"
-        f"📸 <b>Сделайте фотографию в данной точке</b>"
+    # Сохраняем время начала маршрута
+    await state.update_data(route_start_time=datetime.now().isoformat())
+    
+    # Формируем сообщение о первой точке с прогресс-баром
+    point_info = format_route_progress(
+        city=selected_city,
+        current_point=current_point,
+        total_points=len(route_points),
+        current_index=0,
+        collected_containers={}
     )
+    point_info += "\n\n📸 Сделайте фотографию в данной точке"
     
     await callback.message.edit_text(
         text=point_info,
@@ -397,7 +406,7 @@ async def photo_received(message: Message, state: FSMContext) -> None:
     Обработчик получения фотографии с точки маршрута.
     
     Сохраняет фотографию и переводит в состояние ожидания
-    количества собранных коробок.
+    количества собранных контейнеров.
     
     Args:
         message: Объект сообщения с фотографией
@@ -414,54 +423,176 @@ async def photo_received(message: Message, state: FSMContext) -> None:
     
     # Сохраняем file_id фотографии (самого большого размера)
     photo: PhotoSize = message.photo[-1]
-    await state.update_data(current_photo_file_id=photo.file_id)
     
-    # Переводим в состояние ожидания количества коробок
-    await state.set_state(RouteStates.waiting_for_boxes_count)
+    # Инициализируем список фотографий в состоянии
+    photos_list = state_data.get('photos_list', [])
+    photos_list.append(photo.file_id)
+    
+    await state.update_data(photos_list=photos_list)
+    
+    # Переводим в состояние выбора действия с фотографией
+    await state.set_state(RouteStates.waiting_for_photo_decision)
     
     await message.answer(
-        f"📸 Фотография получена!\n\n"
-        f"📦 Укажите количество коробок, собранных в точке "
-        f"<b>{current_point['name']}</b>\n\n"
-        f"Введите число от {MIN_BOXES} до {MAX_BOXES}:"
+        f"📸 Фотография получена! ({len(photos_list)} из любого количества)\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"Что делаем дальше?",
+        reply_markup=get_photo_actions_keyboard()
     )
 
 
-@user_router.message(F.text, RouteStates.waiting_for_boxes_count)
-async def boxes_count_received(message: Message, state: FSMContext, bot: Bot) -> None:
+@user_router.callback_query(F.data == "add_more_photos", RouteStates.waiting_for_photo_decision)
+async def add_more_photos(callback: CallbackQuery, state: FSMContext) -> None:
     """
-    Обработчик получения количества коробок.
+    Обработчик кнопки "Добавить еще фото".
+    
+    Переводит пользователя в состояние ожидания дополнительных фотографий.
+    """
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    photos_list = state_data.get('photos_list', [])
+    
+    # Переводим в состояние ожидания дополнительных фотографий
+    await state.set_state(RouteStates.waiting_for_additional_photos)
+    
+    await callback.message.edit_text(
+        f"📸 Добавляем фотографии ({len(photos_list)} уже добавлено)\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"📷 Отправьте следующую фотографию или нажмите 'Готово'",
+        reply_markup=get_finish_photos_keyboard(len(photos_list))
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "proceed_to_boxes", RouteStates.waiting_for_photo_decision)
+async def proceed_to_boxes(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки "Указать количество контейнеров".
+    
+    Переводит пользователя к вводу количества контейнеров.
+    """
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    
+    # Переводим в состояние ожидания количества контейнеров
+    await state.set_state(RouteStates.waiting_for_containers_count)
+    
+    await callback.message.edit_text(
+        f"📦 Фотографии сохранены!\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"Укажите количество собранных контейнеров\n"
+        f"Введите число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
+    )
+    
+    await callback.answer()
+
+
+@user_router.message(F.photo, RouteStates.waiting_for_additional_photos)
+async def additional_photo_received(message: Message, state: FSMContext) -> None:
+    """
+    Обработчик получения дополнительных фотографий.
+    """
+    # Получаем данные состояния
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    photos_list = state_data.get('photos_list', [])
+    
+    # Сохраняем новую фотографию
+    photo: PhotoSize = message.photo[-1]
+    photos_list.append(photo.file_id)
+    
+    await state.update_data(photos_list=photos_list)
+    
+    await message.answer(
+        f"📸 Фотография добавлена! ({len(photos_list)} всего)\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"Продолжайте добавлять фото или завершите добавление",
+        reply_markup=get_finish_photos_keyboard(len(photos_list))
+    )
+
+
+@user_router.callback_query(F.data == "add_one_more_photo", RouteStates.waiting_for_additional_photos)
+async def add_one_more_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки "Добавить еще" в режиме дополнительных фотографий.
+    """
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    photos_list = state_data.get('photos_list', [])
+    
+    await callback.message.edit_text(
+        f"📸 Добавляем фотографии ({len(photos_list)} уже добавлено)\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"📷 Отправьте следующую фотографию"
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "finish_photos", RouteStates.waiting_for_additional_photos)
+async def finish_photos(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки "Готово" - завершение добавления фотографий.
+    """
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    photos_list = state_data.get('photos_list', [])
+    
+    # Переводим в состояние ожидания количества контейнеров
+    await state.set_state(RouteStates.waiting_for_containers_count)
+    
+    await callback.message.edit_text(
+        f"📸 Все фотографии сохранены! ({len(photos_list)} шт.)\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"📦 Укажите количество собранных контейнеров\n"
+        f"Введите число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
+    )
+    
+    await callback.answer()
+
+
+@user_router.message(F.text, RouteStates.waiting_for_containers_count)
+async def containers_count_received(message: Message, state: FSMContext, bot: Bot) -> None:
+    """
+    Обработчик получения количества контейнеров.
     
     Проверяет корректность введённого числа, сохраняет прогресс
     в базу данных и переходит к следующей точке или завершению маршрута.
     
     Args:
-        message: Объект сообщения с количеством коробок
+        message: Объект сообщения с количеством контейнеров
         state: Контекст состояния FSM
         bot: Объект бота для отправки сообщений
     """
     # Проверяем, что введено число
     try:
-        boxes_count = int(message.text.strip())
+        containers_count = int(message.text.strip())
     except ValueError:
         await message.answer(
-            f"❌ Введите корректное число от {MIN_BOXES} до {MAX_BOXES}"
+            f"❌ Введите корректное число от {MIN_CONTAINERS} до {MAX_CONTAINERS}"
         )
         return
     
     # Проверяем диапазон
-    if boxes_count < MIN_BOXES or boxes_count > MAX_BOXES:
-        await message.answer(ERROR_MESSAGES['invalid_boxes_count'])
+    if containers_count < MIN_CONTAINERS or containers_count > MAX_CONTAINERS:
+        await message.answer(ERROR_MESSAGES['invalid_containers_count'])
         return
     
     # Получаем данные состояния
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
-    current_photo_file_id = state_data.get('current_photo_file_id')
+    photos_list = state_data.get('photos_list', [])
     selected_city = state_data.get('selected_city')
     current_point_index = state_data.get('current_point_index', 0)
     total_points = state_data.get('total_points', 0)
-    collected_boxes = state_data.get('collected_boxes', {})
+    collected_containers = state_data.get('collected_containers', {})
     
     # Сохраняем прогресс в базу данных
     async for session in get_session():
@@ -496,17 +627,27 @@ async def boxes_count_received(message: Message, state: FSMContext, bot: Bot) ->
         progress = RouteProgress(
             user_id=message.from_user.id,
             route_id=route_record.id,
-            boxes_count=boxes_count,
-            photo_file_id=current_photo_file_id,
+            containers_count=containers_count,
             status='completed'
         )
         session.add(progress)
+        await session.flush()  # Получаем ID записи прогресса
+        
+        # Сохраняем все фотографии
+        for index, photo_file_id in enumerate(photos_list, 1):
+            photo_record = RoutePhoto(
+                route_progress_id=progress.id,
+                photo_file_id=photo_file_id,
+                photo_order=index
+            )
+            session.add(photo_record)
+        
         await session.commit()
     
-    # Обновляем счётчик коробок по организациям
+    # Обновляем счётчик контейнеров по организациям
     org = current_point['organization']
-    collected_boxes[org] = collected_boxes.get(org, 0) + boxes_count
-    await state.update_data(collected_boxes=collected_boxes)
+    collected_containers[org] = collected_containers.get(org, 0) + containers_count
+    await state.update_data(collected_containers=collected_containers)
     
     # Проверяем, есть ли ещё точки в маршруте
     next_point_index = current_point_index + 1
@@ -518,19 +659,21 @@ async def boxes_count_received(message: Message, state: FSMContext, bot: Bot) ->
         
         await state.update_data(
             current_point=next_point,
-            current_point_index=next_point_index
+            current_point_index=next_point_index,
+            photos_list=[]  # Очищаем список фотографий для новой точки
         )
         
         # Переводим в состояние ожидания фото для следующей точки
         await state.set_state(RouteStates.waiting_for_photo)
         
-        point_info = (
-            f"✅ Точка завершена! Собрано коробок: {boxes_count}\n\n"
-            f"📍 <b>Следующая точка {next_point_index + 1} из {total_points}</b>\n"
-            f"🏢 <b>Организация:</b> {next_point['organization']}\n"
-            f"🏠 <b>Адрес:</b> {next_point['address']}\n\n"
-            f"📸 Сделайте фотографию в данной точке"
+        point_info = format_route_progress(
+            city=selected_city,
+            current_point=next_point,
+            total_points=total_points,
+            current_index=next_point_index,
+            collected_containers=collected_containers
         )
+        point_info = f"✅ Точка завершена! Собрано контейнеров: {containers_count}, фото: {len(photos_list)}\n\n{point_info}\n\n📸 Сделайте фотографию в данной точке"
         
         await message.answer(point_info)
         
@@ -543,11 +686,11 @@ async def boxes_count_received(message: Message, state: FSMContext, bot: Bot) ->
         summary += f"📊 <b>Сводка по сбору:</b>\n"
         
         total_collected = 0
-        for organization, count in collected_boxes.items():
-            summary += f"• {organization}: {count} коробок\n"
+        for organization, count in collected_containers.items():
+            summary += f"• {organization}: {count} контейнеров\n"
             total_collected += count
         
-        summary += f"\n📦 <b>Всего собрано:</b> {total_collected} коробок"
+        summary += f"\n📦 <b>Всего собрано:</b> {total_collected} контейнеров"
         
         await message.answer(
             text=summary,
@@ -568,18 +711,18 @@ async def complete_route(callback: CallbackQuery, state: FSMContext) -> None:
         state: Контекст состояния FSM
     """
     state_data = await state.get_data()
-    collected_boxes = state_data.get('collected_boxes', {})
+    collected_containers = state_data.get('collected_containers', {})
     selected_city = state_data.get('selected_city')
     
     # Создаём доставки для каждой организации
     async for session in get_session():
-        for organization, boxes_count in collected_boxes.items():
-            if boxes_count > 0:  # Создаём доставку только если есть коробки
+        for organization, containers_count in collected_containers.items():
+            if containers_count > 0:  # Создаём доставку только если есть контейнеры
                 delivery_address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {})
                 
                 delivery = Delivery(
                     organization=organization,
-                    total_boxes=boxes_count,
+                    total_containers=containers_count,
                     delivery_address=delivery_address.get('address', 'Не указан'),
                     contact_info=delivery_address.get('contact', 'Не указан'),
                     status='pending'
@@ -591,18 +734,33 @@ async def complete_route(callback: CallbackQuery, state: FSMContext) -> None:
     # Очищаем состояние
     await state.clear()
     
-    completion_message = (
-        f"✅ <b>Маршрут {selected_city} успешно завершён!</b>\n\n"
-        f"📋 Автоматически сформированы задания на доставку в Москву:\n\n"
+    # Вычисляем общее время прохождения маршрута
+    route_start_time = datetime.fromisoformat(state_data.get('route_start_time'))
+    route_end_time = datetime.now()
+    total_time = route_end_time - route_start_time
+    
+    # Форматируем время в удобный вид
+    hours = total_time.seconds // 3600
+    minutes = (total_time.seconds % 3600) // 60
+    time_str = f"{hours}ч {minutes}мин"
+    
+    # Формируем сообщение с итогами маршрута
+    completion_message = format_route_summary(
+        city=selected_city,
+        total_points=len(AVAILABLE_ROUTES[selected_city]),
+        collected_containers=collected_containers,
+        total_time=time_str
     )
     
-    for organization, boxes_count in collected_boxes.items():
-        if boxes_count > 0:
-            address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {}).get('address', 'Не указан')
-            completion_message += f"📦 <b>{organization}:</b> {boxes_count} коробок\n"
-            completion_message += f"🏠 Адрес: {address}\n\n"
+    completion_message += "\n\n📋 Автоматически сформированы задания на доставку в Москву:\n"
     
-    completion_message += "Администраторы получили уведомление о готовности к отправке."
+    for organization, containers_count in collected_containers.items():
+        if containers_count > 0:
+            address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {}).get('address', 'Не указан')
+            completion_message += f"\n📦 <b>{organization}:</b> {containers_count} контейнеров\n"
+            completion_message += f"🏠 Адрес: {address}"
+    
+    completion_message += "\n\nАдминистраторы получили уведомление о готовности к отправке."
     
     await callback.message.edit_text(
         text=completion_message,
@@ -662,10 +820,10 @@ async def my_routes(message: Message) -> None:
         for route_key, progresses in list(routes_summary.items())[:10]:  # Последние 10
             response += f"📅 <b>{route_key}</b>\n"
             
-            total_boxes = sum(p.boxes_count for p in progresses)
+            total_containers = sum(p.containers_count for p in progresses)
             organizations = set(p.route.organization for p in progresses)
             
-            response += f"📦 Собрано коробок: {total_boxes}\n"
+            response += f"📦 Собрано контейнеров: {total_containers}\n"
             response += f"🏢 Организации: {', '.join(organizations)}\n"
             response += f"📍 Точек пройдено: {len(progresses)}\n\n"
         
@@ -691,8 +849,10 @@ async def unknown_message(message: Message, state: FSMContext) -> None:
     
     if current_state == RouteStates.waiting_for_photo:
         await message.answer(ERROR_MESSAGES['photo_required'])
-    elif current_state == RouteStates.waiting_for_boxes_count:
-        await message.answer(ERROR_MESSAGES['invalid_boxes_count'])
+    elif current_state == RouteStates.waiting_for_additional_photos:
+        await message.answer("📸 Отправьте фотографию или воспользуйтесь кнопками выше")
+    elif current_state == RouteStates.waiting_for_containers_count:
+        await message.answer(ERROR_MESSAGES['invalid_containers_count'])
     else:
         await message.answer(
             "🤔 Я не понимаю это сообщение. Используйте кнопки меню или команды.",

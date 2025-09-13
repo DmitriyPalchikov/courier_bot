@@ -212,18 +212,19 @@ class RouteProgress(Base):
         comment="ID точки маршрута"
     )
     
-    # Количество собранных коробок
-    boxes_count: Mapped[int] = mapped_column(
+    # Количество собранных контейнеров
+    containers_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        comment="Количество собранных коробок"
+        comment="Количество собранных контейнеров"
     )
     
-    # ID фотографии в Telegram
-    photo_file_id: Mapped[Optional[str]] = mapped_column(
-        String(255),
-        nullable=True,
-        comment="File ID фотографии в Telegram"
+    # Связь с фотографиями (одна запись прогресса - много фотографий)
+    photos: Mapped[list["RoutePhoto"]] = relationship(
+        "RoutePhoto",
+        back_populates="route_progress",
+        cascade="all, delete-orphan",
+        order_by="RoutePhoto.photo_order"
     )
     
     # Статус выполнения точки маршрута
@@ -260,7 +261,63 @@ class RouteProgress(Base):
     
     def __repr__(self) -> str:
         """Строковое представление прогресса для отладки"""
-        return f"<RouteProgress(user_id={self.user_id}, route_id={self.route_id}, boxes={self.boxes_count})>"
+        return f"<RouteProgress(user_id={self.user_id}, route_id={self.route_id}, containers={self.containers_count})>"
+
+
+class RoutePhoto(Base):
+    """
+    Модель для хранения фотографий с точек маршрута.
+    
+    Позволяет хранить несколько фотографий для каждой точки маршрута.
+    """
+    __tablename__ = 'route_photos'
+    
+    # Уникальный идентификатор фотографии
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        comment="Уникальный ID фотографии"
+    )
+    
+    # Связь с записью прогресса маршрута
+    route_progress_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey('route_progress.id', ondelete='CASCADE'),
+        nullable=False,
+        comment="ID записи прогресса маршрута"
+    )
+    
+    # ID фотографии в Telegram
+    photo_file_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="File ID фотографии в Telegram"
+    )
+    
+    # Порядковый номер фотографии
+    photo_order: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        comment="Порядковый номер фотографии"
+    )
+    
+    # Описание фотографии (опционально)
+    description: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Описание фотографии"
+    )
+    
+    # Связь с прогрессом маршрута
+    route_progress: Mapped["RouteProgress"] = relationship(
+        "RouteProgress",
+        back_populates="photos"
+    )
+    
+    def __repr__(self) -> str:
+        """Строковое представление фотографии для отладки"""
+        return f"<RoutePhoto(id={self.id}, route_progress_id={self.route_progress_id}, order={self.photo_order})>"
 
 
 class Delivery(Base):
@@ -294,11 +351,11 @@ class Delivery(Base):
         comment="Организация получатель"
     )
     
-    # Общее количество коробок для доставки
-    total_boxes: Mapped[int] = mapped_column(
+    # Общее количество контейнеров для доставки
+    total_containers: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        comment="Общее количество коробок"
+        comment="Общее количество контейнеров"
     )
     
     # Адрес доставки в Москве
@@ -339,4 +396,4 @@ class Delivery(Base):
     
     def __repr__(self) -> str:
         """Строковое представление доставки для отладки"""
-        return f"<Delivery(id={self.id}, org='{self.organization}', boxes={self.total_boxes})>"
+        return f"<Delivery(id={self.id}, org='{self.organization}', containers={self.total_containers})>"

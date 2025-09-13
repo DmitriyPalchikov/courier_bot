@@ -1,38 +1,42 @@
 """
-Административные обработчики для управления курьерским ботом.
+Обработчики административных команд и действий.
 
-Этот модуль содержит функции для администраторов системы:
-- Просмотр статистики и отчётов
-- Управление пользователями
-- Формирование маршрутных листов в Москву
-- Мониторинг активных маршрутов
-
-Доступ к административным функциям имеют только пользователи
-из списка ADMIN_IDS в конфигурации.
+Этот модуль содержит все обработчики для административного
+интерфейса бота, включая просмотр статистики, управление
+пользователями и настройки системы.
 """
 
 import logging
-from datetime import datetime, timedelta
-from typing import List, Dict, Any
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from sqlalchemy import select, func, and_, desc
-from sqlalchemy.orm import selectinload
 
-# Импорты наших модулей
+import os
+from datetime import datetime, timedelta
+from typing import Optional
+
+from aiogram import Router, F, Bot
+from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
+
 from database.database import get_session
 from database.models import User, Route, RouteProgress, Delivery
-from states.user_states import AdminStates
-from config import ADMIN_IDS, MOSCOW_DELIVERY_ADDRESSES
 from keyboards.admin_keyboards import (
     get_admin_menu_keyboard,
-    get_deliveries_keyboard,
-    get_statistics_keyboard
+    get_statistics_keyboard,
+    get_export_keyboard,
+    get_settings_keyboard,
+    get_period_selection_keyboard
 )
+from utils.statistics import (
+    get_route_statistics,
+    get_user_performance,
+    get_busiest_days,
+    format_statistics_message
+)
+from utils.report_generator import generate_excel_report, generate_pdf_report
+from config import ADMIN_IDS
 
-# Создаём роутер для административных обработчиков
+# Создаём роутер для админских хендлеров
 admin_router = Router(name='admin_router')
 
 # Настраиваем логирование
@@ -40,303 +44,403 @@ logger = logging.getLogger(__name__)
 
 
 def is_admin(user_id: int) -> bool:
-    """
-    Проверяет, является ли пользователь администратором.
-    
-    Args:
-        user_id: Telegram ID пользователя
-        
-    Returns:
-        bool: True если пользователь админ, False иначе
-    """
+    """Проверяет, является ли пользователь администратором."""
     return user_id in ADMIN_IDS
 
 
-@admin_router.message(Command('admin'))
+@admin_router.message(Command("admin"))
 async def cmd_admin(message: Message) -> None:
     """
-    Обработчик команды /admin - вход в административную панель.
+    Обработчик команды /admin.
     
-    Проверяет права доступа и отображает меню администратора.
-    
-    Args:
-        message: Объект сообщения от пользователя
+    Показывает административное меню, если пользователь является админом.
     """
     if not is_admin(message.from_user.id):
-        await message.answer("❌ У вас нет прав администратора")
+        await message.answer("❌ У вас нет доступа к этой команде.")
         return
     
     await message.answer(
-        "🔧 <b>Панель администратора</b>\n\n"
-        "Выберите действие:",
+        "👨‍💼 Панель администратора\n\n"
+        "Выберите нужный раздел:",
         reply_markup=get_admin_menu_keyboard()
     )
 
 
-@admin_router.callback_query(F.data == "admin_statistics")
-async def show_statistics(callback: CallbackQuery) -> None:
-    """
-    Показывает общую статистику работы бота.
-    
-    Args:
-        callback: Объект callback query от кнопки статистики
-    """
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
+@admin_router.message(F.text == "📊 Статистика")
+async def show_statistics_menu(message: Message) -> None:
+    """Показывает меню статистики."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
         return
     
-    async for session in get_session():
-        # Общее количество пользователей
-        users_count = await session.scalar(select(func.count(User.telegram_id)))
-        
-        # Активные пользователи за последние 7 дней
-        week_ago = datetime.utcnow() - timedelta(days=7)
-        active_users = await session.scalar(
-            select(func.count(User.telegram_id.distinct())).select_from(
-                User.__table__.join(RouteProgress.__table__)
-            ).where(RouteProgress.visited_at >= week_ago)
-        )
-        
-        # Всего маршрутов пройдено
-        total_routes = await session.scalar(
-            select(func.count(RouteProgress.id))
-        )
-        
-        # Всего коробок собрано
-        total_boxes = await session.scalar(
-            select(func.sum(RouteProgress.boxes_count))
-        ) or 0
-        
-        # Статистика по организациям
-        org_stats = await session.execute(
-            select(
-                Route.organization,
-                func.sum(RouteProgress.boxes_count).label('total_boxes'),
-                func.count(RouteProgress.id).label('total_visits')
-            )
-            .join(RouteProgress)
-            .group_by(Route.organization)
-            .order_by(desc('total_boxes'))
-        )
-        
-        org_data = org_stats.all()
-        
-        # Pending доставки
-        pending_deliveries = await session.scalar(
-            select(func.count(Delivery.id)).where(Delivery.status == 'pending')
-        )
-    
-    # Формируем сообщение со статистикой
-    stats_text = (
-        f"📊 <b>Статистика системы</b>\n\n"
-        f"👥 <b>Пользователи:</b>\n"
-        f"• Всего зарегистрировано: {users_count}\n"
-        f"• Активны за неделю: {active_users or 0}\n\n"
-        f"📦 <b>Сборы товаров:</b>\n"
-        f"• Всего маршрутов: {total_routes or 0}\n"
-        f"• Всего коробок собрано: {total_boxes}\n\n"
-        f"🏢 <b>По организациям:</b>\n"
-    )
-    
-    for org_row in org_data:
-        stats_text += f"• {org_row.organization}: {org_row.total_boxes} коробок ({org_row.total_visits} посещений)\n"
-    
-    stats_text += f"\n🚚 <b>Доставки в Москву:</b>\n"
-    stats_text += f"• Ожидают отправки: {pending_deliveries or 0}"
-    
-    await callback.message.edit_text(
-        text=stats_text,
+    await message.answer(
+        "📊 Статистика\n\n"
+        "Выберите тип статистики:",
         reply_markup=get_statistics_keyboard()
     )
+
+
+@admin_router.callback_query(F.data.startswith("stats_"))
+async def process_statistics_callback(callback: CallbackQuery) -> None:
+    """Обрабатывает нажатия кнопок в меню статистики."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    action = callback.data.split("_")[1]
+    
+    async for session in get_session():
+        if action == "general":
+            # Получаем общую статистику
+            stats = await get_route_statistics(session)
+            message = format_statistics_message(stats)
+            await callback.message.edit_text(
+                message,
+                reply_markup=get_statistics_keyboard()
+            )
+            
+        elif action == "couriers":
+            # Получаем статистику курьеров
+            performers = await get_user_performance(session, limit=10)
+            
+            message = "👥 <b>Топ курьеров:</b>\n\n"
+            for i, user in enumerate(performers, 1):
+                message += (
+                    f"{i}. @{user['username']}\n"
+                    f"📦 Контейнеров: {user['total_containers']}\n"
+                    f"🚚 Маршрутов: {user['total_routes']}\n"
+                    f"📊 Среднее: {user['avg_boxes_per_route']:.1f} контейнеров/маршрут\n\n"
+                )
+            
+            await callback.message.edit_text(
+                message,
+                reply_markup=get_statistics_keyboard()
+            )
+            
+        elif action in ["today", "week", "month"]:
+            # Определяем период
+            days = {
+                "today": 1,
+                "week": 7,
+                "month": 30
+            }[action]
+            
+            # Получаем статистику за период
+            stats = await get_route_statistics(session, days=days)
+            busiest = await get_busiest_days(session, days=days, limit=5)
+            
+            message = format_statistics_message(stats)
+            message += "\n\n📅 <b>Самые загруженные дни:</b>\n"
+            
+            for day in busiest:
+                message += (
+                    f"\n{day['date']}:\n"
+                    f"🚚 Маршрутов: {day['total_routes']}\n"
+                    f"📦 Контейнеров: {day['total_containers']}\n"
+                )
+            
+            await callback.message.edit_text(
+                message,
+                reply_markup=get_statistics_keyboard()
+            )
+            
+        elif action == "refresh":
+            # Просто повторно показываем общую статистику
+            stats = await get_route_statistics(session)
+            message = format_statistics_message(stats)
+            await callback.message.edit_text(
+                message,
+                reply_markup=get_statistics_keyboard()
+            )
+            
+        elif action == "close":
+            # Удаляем сообщение со статистикой
+            await callback.message.delete()
     
     await callback.answer()
 
 
-@admin_router.callback_query(F.data == "admin_deliveries")
-async def show_deliveries(callback: CallbackQuery) -> None:
-    """
-    Показывает список доставок, готовых к отправке в Москву.
-    
-    Args:
-        callback: Объект callback query от кнопки доставок
-    """
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
+@admin_router.message(F.text == "📥 Экспорт отчетов")
+async def show_export_menu(message: Message) -> None:
+    """Показывает меню экспорта отчетов."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
         return
     
-    async for session in get_session():
-        # Получаем pending доставки
-        stmt = select(Delivery).where(
-            Delivery.status == 'pending'
-        ).order_by(Delivery.created_at.desc())
-        
-        deliveries = await session.scalars(stmt)
-        deliveries_list = deliveries.all()
+    await message.answer(
+        "📥 Экспорт отчетов\n\n"
+        "Выберите формат отчета:",
+        reply_markup=get_export_keyboard()
+    )
+
+
+@admin_router.callback_query(F.data.startswith("export_"))
+async def process_export_callback(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Обрабатывает нажатия кнопок в меню экспорта."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
     
-    if not deliveries_list:
+    action = callback.data.split("_")[1]
+    
+    if action == "select_period":
         await callback.message.edit_text(
-            "📭 Нет доставок, ожидающих отправки",
-            reply_markup=get_admin_menu_keyboard()
+            "📅 Выберите период для отчета:",
+            reply_markup=get_period_selection_keyboard()
+        )
+    
+    elif action in ["excel", "pdf"]:
+        # Получаем данные о периоде из состояния
+        data = await state.get_data()
+        start_date = data.get('report_start_date')
+        end_date = data.get('report_end_date')
+        
+        # Конвертируем строки в даты если они есть
+        if start_date:
+            start_date = datetime.fromisoformat(start_date)
+        if end_date:
+            end_date = datetime.fromisoformat(end_date)
+        
+        try:
+            # Отправляем сообщение о начале генерации
+            progress_message = await callback.message.answer(
+                "⏳ Генерация отчета..."
+            )
+            
+            # Генерируем отчет
+            async for session in get_session():
+                if action == "excel":
+                    filepath = await generate_excel_report(
+                        session,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                else:  # pdf
+                    filepath = await generate_pdf_report(
+                        session,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+            
+            # Отправляем файл
+            file = FSInputFile(filepath)
+            await bot.send_document(
+                chat_id=callback.from_user.id,
+                document=file,
+                caption="📊 Ваш отчет готов!"
+            )
+            
+            # Удаляем файл после отправки
+            os.remove(filepath)
+            
+            # Удаляем сообщение о прогрессе
+            await progress_message.delete()
+            
+        except ImportError:
+            await callback.answer(
+                "❌ Библиотеки для генерации отчетов не установлены. Установите: pip install openpyxl reportlab pandas",
+                show_alert=True
+            )
+            return
+        except Exception as e:
+            logger.error(f"Ошибка при генерации отчета: {e}")
+            await callback.answer(
+                "❌ Произошла ошибка при генерации отчета",
+                show_alert=True
+            )
+            return
+    
+    elif action == "close":
+        await callback.message.delete()
+    
+    await callback.answer()
+
+
+@admin_router.message(F.text == "⚙️ Настройки")
+async def show_settings_menu(message: Message) -> None:
+    """Показывает меню настроек."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+    
+    await message.answer(
+        "⚙️ Настройки\n\n"
+        "Выберите раздел настроек:",
+        reply_markup=get_settings_keyboard()
+    )
+
+
+@admin_router.callback_query(F.data.startswith("period_"))
+async def process_period_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор периода для отчета."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    action = callback.data.split("_")[1]
+    
+    # Определяем даты на основе выбранного периода
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    if action == "today":
+        start_date = today
+        end_date = today + timedelta(days=1)
+    elif action == "yesterday":
+        start_date = today - timedelta(days=1)
+        end_date = today
+    elif action == "week":
+        start_date = today - timedelta(days=7)
+        end_date = today + timedelta(days=1)
+    elif action == "month":
+        start_date = today - timedelta(days=30)
+        end_date = today + timedelta(days=1)
+    elif action == "custom":
+        # TODO: Реализовать выбор произвольного периода
+        await callback.answer(
+            "🚧 Выбор произвольного периода в разработке",
+            show_alert=True
+        )
+        return
+    elif action == "cancel":
+        await state.update_data(report_start_date=None, report_end_date=None)
+        await callback.message.edit_text(
+            "📥 Экспорт отчетов\n\n"
+            "Выберите формат отчета:",
+            reply_markup=get_export_keyboard()
         )
         await callback.answer()
         return
+    else:
+        await callback.answer("❌ Неизвестное действие", show_alert=True)
+        return
     
-    # Группируем доставки по организациям
-    org_deliveries = {}
-    for delivery in deliveries_list:
-        org = delivery.organization
-        if org not in org_deliveries:
-            org_deliveries[org] = {
-                'total_boxes': 0,
-                'deliveries_count': 0,
-                'addresses': set()
-            }
-        
-        org_deliveries[org]['total_boxes'] += delivery.total_boxes
-        org_deliveries[org]['deliveries_count'] += 1
-        org_deliveries[org]['addresses'].add(delivery.delivery_address)
-    
-    # Формируем маршрутный лист
-    deliveries_text = (
-        f"🚚 <b>Маршрутный лист в Москву</b>\n"
-        f"📅 Сформирован: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+    # Сохраняем выбранный период в состояние
+    await state.update_data(
+        report_start_date=start_date.isoformat(),
+        report_end_date=end_date.isoformat()
     )
     
-    total_all_boxes = 0
-    for org, data in org_deliveries.items():
-        total_all_boxes += data['total_boxes']
-        
-        deliveries_text += (
-            f"🏢 <b>{org}</b>\n"
-            f"📦 Коробок: {data['total_boxes']}\n"
-            f"📍 Адрес: {MOSCOW_DELIVERY_ADDRESSES.get(org, {}).get('address', 'Не указан')}\n"
-            f"📞 Контакт: {MOSCOW_DELIVERY_ADDRESSES.get(org, {}).get('contact', 'Не указан')}\n"
-            f"🕐 Время работы: {MOSCOW_DELIVERY_ADDRESSES.get(org, {}).get('working_hours', 'Не указано')}\n\n"
-        )
-    
-    deliveries_text += f"📊 <b>Итого коробок: {total_all_boxes}</b>"
-    
+    # Показываем меню экспорта с информацией о выбранном периоде
+    period_info = f"с {start_date.strftime('%d.%m.%Y')} по {end_date.strftime('%d.%m.%Y')}"
     await callback.message.edit_text(
-        text=deliveries_text,
-        reply_markup=get_deliveries_keyboard()
+        f"📥 Экспорт отчетов\n\n"
+        f"📅 Выбранный период: {period_info}\n\n"
+        f"Выберите формат отчета:",
+        reply_markup=get_export_keyboard()
     )
     
     await callback.answer()
 
 
-@admin_router.callback_query(F.data == "confirm_deliveries")
-async def confirm_deliveries(callback: CallbackQuery) -> None:
-    """
-    Подтверждает формирование доставок и меняет их статус.
-    
-    Args:
-        callback: Объект callback query от кнопки подтверждения
-    """
+@admin_router.callback_query(F.data.startswith("settings_"))
+async def process_settings_callback(callback: CallbackQuery) -> None:
+    """Обрабатывает нажатия кнопок в меню настроек."""
     if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    action = callback.data.split("_")[1]
+    
+    if action in ["couriers", "routes"]:
+        await callback.answer(
+            "🚧 Этот раздел находится в разработке",
+            show_alert=True
+        )
+    
+    elif action == "backup":
+        # Создаем директорию для бэкапов если её нет
+        os.makedirs("backups", exist_ok=True)
+        
+        # Создаем имя файла для бэкапа
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = f"backups/courier_bot_{timestamp}.db"
+        
+        try:
+            # Копируем файл базы данных
+            import shutil
+            shutil.copy2("courier_bot.db", backup_path)
+            
+            # Отправляем файл бэкапа
+            file = FSInputFile(backup_path)
+            await callback.message.answer_document(
+                document=file,
+                caption=f"📦 Резервная копия базы данных от {timestamp}"
+            )
+            
+            # Удаляем временный файл
+            os.remove(backup_path)
+            
+            await callback.answer(
+                "✅ Резервная копия создана и отправлена",
+                show_alert=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при создании резервной копии: {e}")
+            await callback.answer(
+                "❌ Ошибка при создании резервной копии",
+                show_alert=True
+            )
+    
+    elif action == "close":
+        await callback.message.delete()
+    
+    await callback.answer()
+
+
+@admin_router.message(F.text == "📋 Активные доставки")
+async def show_active_deliveries(message: Message) -> None:
+    """Показывает список активных доставок в Москву."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
         return
     
     async for session in get_session():
-        # Обновляем статус всех pending доставок
-        stmt = select(Delivery).where(Delivery.status == 'pending')
-        deliveries = await session.scalars(stmt)
+        # Получаем активные доставки
+        deliveries = await session.execute(
+            select(Delivery)
+            .filter(Delivery.status.in_(['pending', 'in_progress']))
+            .order_by(Delivery.delivery_date)
+        )
+        deliveries = deliveries.scalars().all()
         
-        updated_count = 0
+        if not deliveries:
+            await message.answer(
+                "📭 Нет активных доставок в Москву",
+                reply_markup=get_admin_menu_keyboard()
+            )
+            return
+        
+        # Формируем сообщение
+        message_text = "📋 <b>Активные доставки в Москву:</b>\n\n"
+        
         for delivery in deliveries:
-            delivery.status = 'confirmed'
-            updated_count += 1
+            status_emoji = "🕒" if delivery.status == "pending" else "🚚"
+            message_text += (
+                f"{status_emoji} <b>Доставка #{delivery.id}</b>\n"
+                f"📦 Организация: {delivery.organization}\n"
+                f"📦 Контейнеров: {delivery.total_containers}\n"
+                f"📍 Адрес: {delivery.delivery_address}\n"
+                f"📱 Контакт: {delivery.contact_info}\n"
+                f"📅 Дата: {delivery.delivery_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+            )
         
-        await session.commit()
-    
-    await callback.message.edit_text(
-        f"✅ <b>Доставки подтверждены!</b>\n\n"
-        f"Обновлено записей: {updated_count}\n"
-        f"Статус изменён на 'confirmed'\n\n"
-        f"Маршрутный лист готов для печати.",
-        reply_markup=get_admin_menu_keyboard()
-    )
-    
-    await callback.answer("Доставки подтверждены!")
-
-
-@admin_router.callback_query(F.data == "admin_users")
-async def show_users(callback: CallbackQuery) -> None:
-    """
-    Показывает список пользователей системы.
-    
-    Args:
-        callback: Объект callback query от кнопки пользователей
-    """
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
-        return
-    
-    async for session in get_session():
-        # Получаем пользователей с их статистикой
-        stmt = select(
-            User.telegram_id,
-            User.username,
-            User.full_name,
-            User.is_active,
-            User.created_at,
-            func.count(RouteProgress.id).label('routes_count'),
-            func.sum(RouteProgress.boxes_count).label('total_boxes')
-        ).outerjoin(RouteProgress).group_by(
-            User.telegram_id
-        ).order_by(User.created_at.desc()).limit(20)
-        
-        users_data = await session.execute(stmt)
-        users_list = users_data.all()
-    
-    if not users_list:
-        await callback.message.edit_text(
-            "👥 Пользователей не найдено",
+        await message.answer(
+            message_text,
             reply_markup=get_admin_menu_keyboard()
         )
-        await callback.answer()
-        return
-    
-    # Формируем список пользователей
-    users_text = "👥 <b>Пользователи системы</b>\n\n"
-    
-    for user_data in users_list[:10]:  # Показываем первых 10
-        status = "🟢" if user_data.is_active else "🔴"
-        username = f"@{user_data.username}" if user_data.username else "Без username"
-        
-        users_text += (
-            f"{status} <b>{user_data.full_name or 'Без имени'}</b>\n"
-            f"ID: {user_data.telegram_id}\n"
-            f"Username: {username}\n"
-            f"Маршрутов: {user_data.routes_count or 0}\n"
-            f"Коробок: {user_data.total_boxes or 0}\n"
-            f"Регистрация: {user_data.created_at.strftime('%d.%m.%Y')}\n\n"
-        )
-    
-    await callback.message.edit_text(
-        text=users_text,
-        reply_markup=get_admin_menu_keyboard()
-    )
-    
-    await callback.answer()
 
 
-# Возврат в меню администратора
-@admin_router.callback_query(F.data == "admin_menu")
-async def back_to_admin_menu(callback: CallbackQuery) -> None:
-    """
-    Возврат в главное меню администратора.
-    
-    Args:
-        callback: Объект callback query
-    """
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещён", show_alert=True)
+@admin_router.message(F.text == "🏠 Главное меню")
+async def return_to_main_menu(message: Message) -> None:
+    """Возвращает в главное меню бота."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
         return
     
-    await callback.message.edit_text(
-        "🔧 <b>Панель администратора</b>\n\n"
-        "Выберите действие:",
-        reply_markup=get_admin_menu_keyboard()
-    )
+    from keyboards.user_keyboards import get_main_menu_keyboard
     
-    await callback.answer()
+    await message.answer(
+        "🏠 Вы вернулись в главное меню",
+        reply_markup=get_main_menu_keyboard()
+    )
