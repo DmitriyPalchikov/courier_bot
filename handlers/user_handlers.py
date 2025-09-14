@@ -35,7 +35,8 @@ from keyboards.user_keyboards import (
     get_confirmation_keyboard,
     get_complete_route_keyboard,
     get_photo_actions_keyboard,
-    get_finish_photos_keyboard
+    get_finish_photos_keyboard,
+    get_point_data_management_keyboard
 )
 from config import (
     WELCOME_MESSAGE,
@@ -430,15 +431,22 @@ async def photo_received(message: Message, state: FSMContext) -> None:
     
     await state.update_data(photos_list=photos_list)
     
-    # Переводим в состояние выбора действия с фотографией
-    await state.set_state(RouteStates.waiting_for_photo_decision)
+    # Переводим в новое состояние управления данными точки
+    await state.set_state(RouteStates.managing_point_data)
     
     await message.answer(
-        f"📸 Фотография получена! ({len(photos_list)} из любого количества)\n\n"
+        f"📸 Фотография получена! ({len(photos_list)} шт.)\n\n"
         f"📍 Точка: <b>{current_point['name']}</b>\n"
         f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
-        f"Что делаем дальше?",
-        reply_markup=get_photo_actions_keyboard()
+        f"Теперь заполните данные для точки:",
+        reply_markup=get_point_data_management_keyboard(
+            has_photos=True,
+            has_containers=False,
+            has_comment=False,
+            photos_count=len(photos_list),
+            containers_count=0,
+            comment_text=""
+        )
     )
 
 
@@ -539,20 +547,29 @@ async def add_one_more_photo(callback: CallbackQuery, state: FSMContext) -> None
 async def finish_photos(callback: CallbackQuery, state: FSMContext) -> None:
     """
     Обработчик кнопки "Готово" - завершение добавления фотографий.
+    Возвращает в состояние управления данными точки.
     """
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
     photos_list = state_data.get('photos_list', [])
+    containers_count = state_data.get('containers_count', 0)
+    comment = state_data.get('comment', '')
     
-    # Переводим в состояние ожидания количества контейнеров
-    await state.set_state(RouteStates.waiting_for_containers_count)
+    # Переводим в состояние управления данными точки
+    await state.set_state(RouteStates.managing_point_data)
+    
+    status_text = _get_point_status_text(state_data, current_point)
     
     await callback.message.edit_text(
-        f"📸 Все фотографии сохранены! ({len(photos_list)} шт.)\n\n"
-        f"📍 Точка: <b>{current_point['name']}</b>\n"
-        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
-        f"📦 Укажите количество собранных контейнеров\n"
-        f"Введите число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
+        status_text,
+        reply_markup=get_point_data_management_keyboard(
+            has_photos=len(photos_list) > 0,
+            has_containers=containers_count > 0,
+            has_comment=bool(comment),
+            photos_count=len(photos_list),
+            containers_count=containers_count,
+            comment_text=comment
+        )
     )
     
     await callback.answer()
@@ -594,13 +611,27 @@ async def containers_count_received(message: Message, state: FSMContext, bot: Bo
     total_points = state_data.get('total_points', 0)
     collected_containers = state_data.get('collected_containers', {})
     
-    # Сохраняем количество контейнеров в состоянии и переходим к комментарию
+    # Сохраняем количество контейнеров в состоянии и возвращаемся к управлению данными
     await state.update_data(containers_count=containers_count)
-    await state.set_state(RouteStates.waiting_for_comment)
+    await state.set_state(RouteStates.managing_point_data)
+    
+    # Получаем обновленные данные для отображения статуса
+    state_data = await state.get_data()
+    photos_list = state_data.get('photos_list', [])
+    comment = state_data.get('comment', '')
+    
+    status_text = _get_point_status_text(state_data, current_point)
     
     await message.answer(
-        f"✅ Количество контейнеров: {containers_count}\n\n"
-        f"📝 Напишите короткий комментарий к этой точке маршрута:"
+        f"✅ Количество контейнеров сохранено: {containers_count}\n\n" + status_text,
+        reply_markup=get_point_data_management_keyboard(
+            has_photos=len(photos_list) > 0,
+            has_containers=True,
+            has_comment=bool(comment),
+            photos_count=len(photos_list),
+            containers_count=containers_count,
+            comment_text=comment
+        )
     )
 
 
@@ -609,7 +640,7 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
     """
     Обработчик получения комментария к точке маршрута.
     
-    Сохраняет всю информацию о точке в базу данных и переходит к следующей точке.
+    Сохраняет комментарий и возвращает в состояние управления данными точки.
     
     Args:
         message: Объект сообщения с комментарием
@@ -627,11 +658,207 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
     photos_list = state_data.get('photos_list', [])
+    containers_count = state_data.get('containers_count', 0)
+    
+    # Сохраняем комментарий в состоянии
+    await state.update_data(comment=comment)
+    await state.set_state(RouteStates.managing_point_data)
+    
+    # Получаем обновленные данные для отображения статуса
+    state_data = await state.get_data()
+    
+    status_text = _get_point_status_text(state_data, current_point)
+    
+    await message.answer(
+        f"✅ Комментарий сохранен!\n\n" + status_text,
+        reply_markup=get_point_data_management_keyboard(
+            has_photos=len(photos_list) > 0,
+            has_containers=containers_count > 0,
+            has_comment=True,
+            photos_count=len(photos_list),
+            containers_count=containers_count,
+            comment_text=comment
+        )
+    )
+
+
+# ==============================================
+# НОВЫЕ ОБРАБОТЧИКИ ДЛЯ УПРАВЛЕНИЯ ДАННЫМИ ТОЧКИ
+# ==============================================
+
+def _get_point_status_text(state_data: dict, current_point: dict) -> str:
+    """
+    Формирует текст со статусом заполнения данных точки.
+    """
+    photos_list = state_data.get('photos_list', [])
+    containers_count = state_data.get('containers_count', 0)
+    comment = state_data.get('comment', '')
+    
+    status_text = f"📍 Точка: <b>{current_point['name']}</b>\n"
+    status_text += f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+    status_text += "📊 Статус заполнения:\n"
+    status_text += f"📸 Фото: {'✅' if photos_list else '❌'} ({len(photos_list)} шт.)\n"
+    status_text += f"📦 Контейнеры: {'✅' if containers_count > 0 else '❌'} ({containers_count} шт.)\n"
+    status_text += f"📝 Комментарий: {'✅' if comment else '❌'}\n\n"
+    
+    if photos_list and containers_count > 0 and comment:
+        status_text += "🚀 Все данные заполнены! Можете продолжить маршрут."
+    else:
+        status_text += "⚠️ Заполните все необходимые данные для продолжения."
+    
+    return status_text
+
+
+@user_router.callback_query(F.data == "add_photos", RouteStates.managing_point_data)
+async def add_photos_from_management(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки добавления фотографий из меню управления данными.
+    """
+    await state.set_state(RouteStates.waiting_for_additional_photos)
+    
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    photos_list = state_data.get('photos_list', [])
+    
+    await callback.message.edit_text(
+        f"📸 Добавляем фотографии ({len(photos_list)} уже добавлено)\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"📷 Отправьте фотографию или нажмите 'Готово'",
+        reply_markup=get_finish_photos_keyboard(len(photos_list))
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "edit_photos", RouteStates.managing_point_data)
+async def edit_photos_from_management(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки редактирования фотографий из меню управления данными.
+    """
+    await state.set_state(RouteStates.waiting_for_additional_photos)
+    
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    photos_list = state_data.get('photos_list', [])
+    
+    await callback.message.edit_text(
+        f"📸 Редактируем фотографии ({len(photos_list)} шт.)\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"📷 Отправьте новую фотографию или нажмите 'Готово' для возврата",
+        reply_markup=get_finish_photos_keyboard(len(photos_list))
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "add_containers", RouteStates.managing_point_data)
+async def add_containers_from_management(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки добавления контейнеров из меню управления данными.
+    """
+    await state.set_state(RouteStates.waiting_for_containers_count)
+    
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    
+    await callback.message.edit_text(
+        f"📦 Укажите количество собранных контейнеров\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"Введите число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "edit_containers", RouteStates.managing_point_data)
+async def edit_containers_from_management(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки редактирования контейнеров из меню управления данными.
+    """
+    await state.set_state(RouteStates.waiting_for_containers_count)
+    
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    current_containers = state_data.get('containers_count', 0)
+    
+    await callback.message.edit_text(
+        f"📦 Изменение количества контейнеров\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"Текущее количество: {current_containers}\n"
+        f"Введите новое число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "add_comment", RouteStates.managing_point_data)
+async def add_comment_from_management(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки добавления комментария из меню управления данными.
+    """
+    await state.set_state(RouteStates.waiting_for_comment)
+    
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    
+    await callback.message.edit_text(
+        f"📝 Добавьте комментарий к точке\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"Напишите короткий комментарий (максимум 500 символов):"
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "edit_comment", RouteStates.managing_point_data)
+async def edit_comment_from_management(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки редактирования комментария из меню управления данными.
+    """
+    await state.set_state(RouteStates.waiting_for_comment)
+    
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    current_comment = state_data.get('comment', '')
+    
+    await callback.message.edit_text(
+        f"📝 Изменение комментария\n\n"
+        f"📍 Точка: <b>{current_point['name']}</b>\n"
+        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+        f"Текущий комментарий: {current_comment}\n\n"
+        f"Введите новый комментарий (максимум 500 символов):"
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "continue_route", RouteStates.managing_point_data)
+async def continue_route_from_management(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """
+    Обработчик кнопки "Продолжить маршрут".
+    
+    Сохраняет всю информацию о точке в базу данных и переходит к следующей точке.
+    """
+    # Получаем данные состояния
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    photos_list = state_data.get('photos_list', [])
     selected_city = state_data.get('selected_city')
     current_point_index = state_data.get('current_point_index', 0)
     total_points = state_data.get('total_points', 0)
     collected_containers = state_data.get('collected_containers', {})
     containers_count = state_data.get('containers_count', 0)
+    comment = state_data.get('comment', '')
+    
+    # Проверяем, что все данные заполнены
+    if not photos_list or containers_count <= 0 or not comment:
+        await callback.answer("❌ Заполните все необходимые данные!", show_alert=True)
+        return
     
     # Сохраняем прогресс в базу данных
     async for session in get_session():
@@ -664,7 +891,7 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
         
         # Создаём запись прогресса
         progress = RouteProgress(
-            user_id=message.from_user.id,
+            user_id=callback.from_user.id,
             route_id=route_record.id,
             containers_count=containers_count,
             notes=comment,
@@ -700,7 +927,9 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
         await state.update_data(
             current_point=next_point,
             current_point_index=next_point_index,
-            photos_list=[]  # Очищаем список фотографий для новой точки
+            photos_list=[],  # Очищаем список фотографий для новой точки
+            containers_count=0,  # Очищаем количество контейнеров для новой точки
+            comment=""  # Очищаем комментарий для новой точки
         )
         
         # Переводим в состояние ожидания фото для следующей точки
@@ -715,7 +944,7 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
         )
         point_info = f"✅ Точка завершена! Собрано контейнеров: {containers_count}, фото: {len(photos_list)}\n💬 Комментарий: {comment}\n\n{point_info}\n\n📸 Сделайте фотографию в данной точке"
         
-        await message.answer(point_info)
+        await callback.message.answer(point_info)
         
     else:
         # Все точки пройдены, переходим к завершению маршрута
@@ -732,10 +961,12 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
         
         summary += f"\n📦 <b>Всего собрано:</b> {total_collected} контейнеров"
         
-        await message.answer(
+        await callback.message.answer(
             text=summary,
             reply_markup=get_complete_route_keyboard()
         )
+    
+    await callback.answer()
 
 
 @user_router.callback_query(F.data == "complete_route", RouteStates.waiting_for_route_completion)
@@ -895,6 +1126,8 @@ async def unknown_message(message: Message, state: FSMContext) -> None:
         await message.answer(ERROR_MESSAGES['invalid_containers_count'])
     elif current_state == RouteStates.waiting_for_comment:
         await message.answer("📝 Напишите короткий комментарий к этой точке маршрута (максимум 500 символов)")
+    elif current_state == RouteStates.managing_point_data:
+        await message.answer("🔄 Используйте кнопки выше для управления данными точки")
     else:
         await message.answer(
             "🤔 Я не понимаю это сообщение. Используйте кнопки меню или команды.",
