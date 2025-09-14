@@ -212,6 +212,13 @@ class RouteProgress(Base):
         comment="ID точки маршрута"
     )
     
+    # Уникальный ID сессии маршрута (для группировки точек одного маршрута)
+    route_session_id: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        comment="Уникальный ID сессии маршрута"
+    )
+    
     # Количество собранных контейнеров
     containers_count: Mapped[int] = mapped_column(
         Integer,

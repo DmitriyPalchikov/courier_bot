@@ -451,3 +451,157 @@ def get_point_data_management_keyboard(
     builder.adjust(1)
     
     return builder.as_markup()
+
+
+def get_route_selection_keyboard(routes_data: list) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для выбора маршрута из истории.
+    
+    Args:
+        routes_data: Список словарей с данными маршрутов
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками выбора маршрутов
+    """
+    builder = InlineKeyboardBuilder()
+    
+    for i, route_data in enumerate(routes_data):
+        # Формируем текст кнопки: дата - город - количество точек
+        date = route_data['date']
+        city = route_data['city']
+        points_count = route_data['points_count']
+        total_containers = route_data['total_containers']
+        
+        button_text = f"📅 {date} - {city} ({points_count} точек, {total_containers} контейнеров)"
+        callback_data = f"view_route:{route_data['route_id']}"
+        
+        builder.add(InlineKeyboardButton(
+            text=button_text,
+            callback_data=callback_data
+        ))
+    
+    # Кнопка возврата в главное меню
+    builder.add(InlineKeyboardButton(
+        text="🔙 Назад в меню",
+        callback_data="back_to_main_menu"
+    ))
+    
+    # Размещаем кнопки по одной в ряду
+    builder.adjust(1)
+    
+    return builder.as_markup()
+
+
+def get_route_detail_keyboard(
+    route_id: str,
+    current_point_index: int,
+    total_points: int,
+    has_photos: bool = False
+) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для детального просмотра маршрута.
+    
+    Args:
+        route_id: ID маршрута
+        current_point_index: Индекс текущей точки (0-based)
+        total_points: Общее количество точек
+        has_photos: Есть ли фотографии у текущей точки
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками навигации
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопки навигации по точкам
+    if current_point_index > 0:
+        builder.add(InlineKeyboardButton(
+            text="⬅️ Предыдущая точка",
+            callback_data=f"route_point:{route_id}:{current_point_index - 1}"
+        ))
+    
+    if current_point_index < total_points - 1:
+        builder.add(InlineKeyboardButton(
+            text="Следующая точка ➡️",
+            callback_data=f"route_point:{route_id}:{current_point_index + 1}"
+        ))
+    
+    # Кнопка просмотра фотографий (если есть)
+    if has_photos:
+        builder.add(InlineKeyboardButton(
+            text="📸 Просмотреть фотографии",
+            callback_data=f"view_photos:{route_id}:{current_point_index}"
+        ))
+    
+    # Кнопка возврата к списку маршрутов
+    builder.add(InlineKeyboardButton(
+        text="📋 К списку маршрутов",
+        callback_data="back_to_routes"
+    ))
+    
+    # Кнопка возврата в главное меню
+    builder.add(InlineKeyboardButton(
+        text="🔙 Главное меню",
+        callback_data="back_to_main_menu"
+    ))
+    
+    # Размещаем кнопки
+    if current_point_index > 0 and current_point_index < total_points - 1:
+        builder.adjust(2, 1, 1, 1)  # Навигация в одном ряду, остальные отдельно
+    else:
+        builder.adjust(1)  # Все кнопки отдельно
+    
+    return builder.as_markup()
+
+
+def get_photos_viewer_keyboard(
+    route_id: str,
+    point_index: int,
+    current_photo_index: int,
+    total_photos: int
+) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для просмотра фотографий точки маршрута.
+    
+    Args:
+        route_id: ID маршрута
+        point_index: Индекс точки
+        current_photo_index: Индекс текущей фотографии (0-based)
+        total_photos: Общее количество фотографий
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками навигации по фотографиям
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопки навигации по фотографиям
+    if current_photo_index > 0:
+        builder.add(InlineKeyboardButton(
+            text="⬅️ Предыдущее фото",
+            callback_data=f"view_photo:{route_id}:{point_index}:{current_photo_index - 1}"
+        ))
+    
+    if current_photo_index < total_photos - 1:
+        builder.add(InlineKeyboardButton(
+            text="Следующее фото ➡️",
+            callback_data=f"view_photo:{route_id}:{point_index}:{current_photo_index + 1}"
+        ))
+    
+    # Информация о текущей фотографии
+    builder.add(InlineKeyboardButton(
+        text=f"📸 {current_photo_index + 1} из {total_photos}",
+        callback_data="photo_info"
+    ))
+    
+    # Кнопка возврата к деталям маршрута
+    builder.add(InlineKeyboardButton(
+        text="🔙 К деталям маршрута",
+        callback_data=f"route_point:{route_id}:{point_index}"
+    ))
+    
+    # Размещаем кнопки
+    if current_photo_index > 0 and current_photo_index < total_photos - 1:
+        builder.adjust(2, 1, 1)  # Навигация в одном ряду
+    else:
+        builder.adjust(1)  # Все кнопки отдельно
+    
+    return builder.as_markup()
