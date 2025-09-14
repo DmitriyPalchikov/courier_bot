@@ -36,7 +36,8 @@ def format_route_progress(
     current_point: Dict,
     total_points: int,
     current_index: int,
-    collected_containers: Dict[str, int]
+    collected_containers: Dict[str, int],
+    completed_points: int = 0
 ) -> str:
     """
     Форматирует сообщение о прогрессе маршрута.
@@ -47,12 +48,13 @@ def format_route_progress(
         total_points: Общее количество точек
         current_index: Текущий индекс (0-based)
         collected_containers: Словарь с количеством собранных контейнеров по организациям
+        completed_points: Количество завершенных точек (для расчета прогресса)
     
     Returns:
         Отформатированное сообщение с прогресс-баром
     """
-    # Создаем прогресс-бар
-    progress = create_progress_bar(current_index + 1, total_points)
+    # Создаем прогресс-бар на основе завершенных точек
+    progress = create_progress_bar(completed_points, total_points)
     
     # Формируем статистику по собранным контейнерам
     containers_info = []
@@ -65,6 +67,7 @@ def format_route_progress(
     message_parts = [
         f"🏙️ {bold(f'Маршрут: {city}')}",
         f"📍 {bold(f'Точка {current_index + 1} из {total_points}')}",
+        f"✅ {bold(f'Завершено: {completed_points} из {total_points}')}",
         f"\n{progress}\n",
         f"🏢 {bold('Организация:')} {current_point['organization']}",
         f"📍 {bold('Адрес:')} {current_point['address']}",
