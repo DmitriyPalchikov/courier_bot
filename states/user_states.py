@@ -42,6 +42,9 @@ class RouteStates(StatesGroup):
     # Контейнеры указаны, ожидаем комментарий к точке
     waiting_for_comment = State()
     
+    # Новое состояние: управление всеми действиями на точке (фото, контейнеры, комментарий)
+    managing_point_data = State()
+    
     # Ожидание подтверждения перехода к следующей точке
     waiting_for_next_point_confirmation = State()
     

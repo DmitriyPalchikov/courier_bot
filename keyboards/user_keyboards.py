@@ -379,3 +379,74 @@ def get_finish_photos_keyboard(photos_count: int) -> InlineKeyboardMarkup:
     builder.adjust(1)
     
     return builder.as_markup()
+
+
+def get_point_data_management_keyboard(
+    has_photos: bool = False, 
+    has_containers: bool = False, 
+    has_comment: bool = False,
+    photos_count: int = 0,
+    containers_count: int = 0,
+    comment_text: str = ""
+) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для управления данными точки маршрута.
+    
+    Позволяет добавлять/редактировать фото, контейнеры и комментарий.
+    Показывает кнопку "Продолжить маршрут" только когда все данные заполнены.
+    
+    Args:
+        has_photos: Есть ли фотографии
+        has_containers: Указано ли количество контейнеров
+        has_comment: Добавлен ли комментарий
+        photos_count: Количество фотографий
+        containers_count: Количество контейнеров
+        comment_text: Текст комментария (для превью)
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками управления данными
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопка для фотографий
+    if has_photos:
+        photo_text = f"📸 Фото ({photos_count} шт.) ✅"
+        photo_callback = "edit_photos"
+    else:
+        photo_text = "📸 Добавить фото"
+        photo_callback = "add_photos"
+    
+    builder.add(InlineKeyboardButton(text=photo_text, callback_data=photo_callback))
+    
+    # Кнопка для контейнеров
+    if has_containers:
+        containers_text = f"📦 Контейнеры ({containers_count} шт.) ✅"
+        containers_callback = "edit_containers"
+    else:
+        containers_text = "📦 Указать количество контейнеров"
+        containers_callback = "add_containers"
+    
+    builder.add(InlineKeyboardButton(text=containers_text, callback_data=containers_callback))
+    
+    # Кнопка для комментария  
+    if has_comment:
+        comment_preview = comment_text[:20] + "..." if len(comment_text) > 20 else comment_text
+        comment_text = f"📝 Комментарий ({comment_preview}) ✅"
+        comment_callback = "edit_comment"
+    else:
+        comment_text = "📝 Добавить комментарий"
+        comment_callback = "add_comment"
+    
+    builder.add(InlineKeyboardButton(text=comment_text, callback_data=comment_callback))
+    
+    # Кнопка "Продолжить маршрут" - показывается только если все данные заполнены
+    if has_photos and has_containers and has_comment:
+        builder.add(InlineKeyboardButton(
+            text="🚀 Продолжить маршрут", 
+            callback_data="continue_route"
+        ))
+    
+    # Размещаем все кнопки по одной в ряду
+    builder.adjust(1)
+    
+    return builder.as_markup()
