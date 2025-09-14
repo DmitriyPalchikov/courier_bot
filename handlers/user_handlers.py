@@ -193,7 +193,8 @@ async def city_selected(callback: CallbackQuery, state: FSMContext) -> None:
         selected_city=city_name,
         route_points=route_points,
         current_point_index=0,
-        collected_containers={}
+        collected_containers={},
+        completed_points=0  # Добавляем счетчик завершенных точек
     )
     
     # Переводим в состояние ожидания подтверждения
@@ -261,7 +262,8 @@ async def confirm_route_start(callback: CallbackQuery, state: FSMContext) -> Non
         current_point=current_point,
         total_points=len(route_points),
         current_index=0,
-        collected_containers={}
+        collected_containers={},
+        completed_points=0  # На первой точке еще ничего не завершено
     )
     point_info += "\n\n📸 Сделайте фотографию в данной точке"
     
@@ -564,7 +566,7 @@ async def finish_photos(callback: CallbackQuery, state: FSMContext) -> None:
         status_text,
         reply_markup=get_point_data_management_keyboard(
             has_photos=len(photos_list) > 0,
-            has_containers=containers_count > 0,
+            has_containers=containers_count >= 0,
             has_comment=bool(comment),
             photos_count=len(photos_list),
             containers_count=containers_count,
@@ -673,7 +675,7 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
         f"✅ Комментарий сохранен!\n\n" + status_text,
         reply_markup=get_point_data_management_keyboard(
             has_photos=len(photos_list) > 0,
-            has_containers=containers_count > 0,
+            has_containers=containers_count >= 0,
             has_comment=True,
             photos_count=len(photos_list),
             containers_count=containers_count,
@@ -698,10 +700,10 @@ def _get_point_status_text(state_data: dict, current_point: dict) -> str:
     status_text += f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
     status_text += "📊 Статус заполнения:\n"
     status_text += f"📸 Фото: {'✅' if photos_list else '❌'} ({len(photos_list)} шт.)\n"
-    status_text += f"📦 Контейнеры: {'✅' if containers_count > 0 else '❌'} ({containers_count} шт.)\n"
+    status_text += f"📦 Контейнеры: {'✅' if containers_count >= 0 else '❌'} ({containers_count} шт.)\n"
     status_text += f"📝 Комментарий: {'✅' if comment else '❌'}\n\n"
     
-    if photos_list and containers_count > 0 and comment:
+    if photos_list and containers_count >= 0 and comment:
         status_text += "🚀 Все данные заполнены! Можете продолжить маршрут."
     else:
         status_text += "⚠️ Заполните все необходимые данные для продолжения."
@@ -856,7 +858,7 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
     comment = state_data.get('comment', '')
     
     # Проверяем, что все данные заполнены
-    if not photos_list or containers_count <= 0 or not comment:
+    if not photos_list or containers_count < 0 or not comment:
         await callback.answer("❌ Заполните все необходимые данные!", show_alert=True)
         return
     
@@ -914,7 +916,14 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
     # Обновляем счётчик контейнеров по организациям
     org = current_point['organization']
     collected_containers[org] = collected_containers.get(org, 0) + containers_count
-    await state.update_data(collected_containers=collected_containers)
+    
+    # Увеличиваем счетчик завершенных точек
+    completed_points = state_data.get('completed_points', 0) + 1
+    
+    await state.update_data(
+        collected_containers=collected_containers,
+        completed_points=completed_points
+    )
     
     # Проверяем, есть ли ещё точки в маршруте
     next_point_index = current_point_index + 1
@@ -940,7 +949,8 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
             current_point=next_point,
             total_points=total_points,
             current_index=next_point_index,
-            collected_containers=collected_containers
+            collected_containers=collected_containers,
+            completed_points=completed_points  # Передаем количество завершенных точек
         )
         point_info = f"✅ Точка завершена! Собрано контейнеров: {containers_count}, фото: {len(photos_list)}\n💬 Комментарий: {comment}\n\n{point_info}\n\n📸 Сделайте фотографию в данной точке"
         
@@ -952,6 +962,7 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
         
         # Формируем сводку по маршруту
         summary = f"🎉 <b>Все точки маршрута пройдены!</b>\n\n"
+        summary += f"✅ <b>Завершено: {completed_points} из {total_points} точек</b>\n"
         summary += f"📊 <b>Сводка по сбору:</b>\n"
         
         total_collected = 0

@@ -440,6 +440,7 @@ def get_point_data_management_keyboard(
     builder.add(InlineKeyboardButton(text=comment_text, callback_data=comment_callback))
     
     # Кнопка "Продолжить маршрут" - показывается только если все данные заполнены
+    # has_containers может быть True даже при 0 контейнерах
     if has_photos and has_containers and has_comment:
         builder.add(InlineKeyboardButton(
             text="🚀 Продолжить маршрут", 
