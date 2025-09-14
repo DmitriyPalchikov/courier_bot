@@ -36,7 +36,10 @@ from keyboards.user_keyboards import (
     get_complete_route_keyboard,
     get_photo_actions_keyboard,
     get_finish_photos_keyboard,
-    get_point_data_management_keyboard
+    get_point_data_management_keyboard,
+    get_route_selection_keyboard,
+    get_route_detail_keyboard,
+    get_photos_viewer_keyboard
 )
 from config import (
     WELCOME_MESSAGE,
@@ -241,13 +244,18 @@ async def confirm_route_start(callback: CallbackQuery, state: FSMContext) -> Non
         await state.clear()
         return
     
+    # Генерируем уникальный ID сессии маршрута
+    from utils.route_session import generate_route_session_id
+    route_session_id = generate_route_session_id(callback.from_user.id, selected_city)
+    
     # Начинаем с первой точки маршрута
     current_point = route_points[0]
     
     # Обновляем данные состояния
     await state.update_data(
         current_point=current_point,
-        total_points=len(route_points)
+        total_points=len(route_points),
+        route_session_id=route_session_id
     )
     
     # Переводим в состояние ожидания фотографии
@@ -856,6 +864,7 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
     collected_containers = state_data.get('collected_containers', {})
     containers_count = state_data.get('containers_count', 0)
     comment = state_data.get('comment', '')
+    route_session_id = state_data.get('route_session_id')
     
     # Проверяем, что все данные заполнены
     if not photos_list or containers_count < 0 or not comment:
@@ -895,6 +904,7 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
         progress = RouteProgress(
             user_id=callback.from_user.id,
             route_id=route_record.id,
+            route_session_id=route_session_id,
             containers_count=containers_count,
             notes=comment,
             status='completed'
@@ -1061,7 +1071,7 @@ async def complete_route(callback: CallbackQuery, state: FSMContext) -> None:
 @user_router.message(F.text == "📊 Мои маршруты")
 async def my_routes(message: Message) -> None:
     """
-    Показывает историю маршрутов пользователя.
+    Показывает историю маршрутов пользователя с группировкой по route_session_id.
     
     Args:
         message: Объект сообщения от пользователя
@@ -1069,7 +1079,8 @@ async def my_routes(message: Message) -> None:
     async for session in get_session():
         # Получаем все маршруты пользователя с детализацией
         stmt = select(RouteProgress).options(
-            selectinload(RouteProgress.route)
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
         ).where(
             RouteProgress.user_id == message.from_user.id
         ).order_by(RouteProgress.visited_at.desc())
@@ -1084,34 +1095,56 @@ async def my_routes(message: Message) -> None:
             )
             return
         
-        # Группируем маршруты по дате и городу
+        # Группируем по route_session_id
         routes_summary = {}
         for route_progress in routes_list:
+            session_id = route_progress.route_session_id
             date = route_progress.visited_at.strftime("%d.%m.%Y")
             city = route_progress.route.city_name
             
-            key = f"{date} - {city}"
-            if key not in routes_summary:
-                routes_summary[key] = []
+            # Используем session_id как ключ для группировки
+            if session_id not in routes_summary:
+                # Находим время первой точки этого маршрута
+                first_time = min(p.visited_at for p in routes_list if p.route_session_id == session_id)
+                time_start = first_time.strftime("%H:%M")
+                
+                routes_summary[session_id] = {
+                    'route_id': session_id,
+                    'date': date,
+                    'city': city,
+                    'time_start': time_start,
+                    'progresses': []
+                }
             
-            routes_summary[key].append(route_progress)
+            routes_summary[session_id]['progresses'].append(route_progress)
+        
+        # Сортируем точки в каждом маршруте по времени
+        for route_info in routes_summary.values():
+            route_info['progresses'].sort(key=lambda x: x.visited_at)
+        
+        # Формируем данные для клавиатуры
+        routes_data = []
+        for session_id, route_info in list(routes_summary.items())[:10]:  # Ограничиваем 10 маршрутами
+            progresses = route_info['progresses']
+            total_containers = sum(p.containers_count for p in progresses)
+            points_count = len(progresses)
+            
+            routes_data.append({
+                'route_id': session_id,  # Используем session_id как route_id
+                'date': route_info['date'],
+                'city': route_info['city'],
+                'points_count': points_count,
+                'total_containers': total_containers
+            })
         
         # Формируем ответное сообщение
-        response = "📊 <b>История ваших маршрутов:</b>\n\n"
+        response = "📊 <b>Ваши завершенные маршруты:</b>\n\n"
+        response += "Выберите маршрут для детального просмотра:\n"
         
-        for route_key, progresses in list(routes_summary.items())[:10]:  # Последние 10
-            response += f"📅 <b>{route_key}</b>\n"
-            
-            total_containers = sum(p.containers_count for p in progresses)
-            organizations = set(p.route.organization for p in progresses)
-            
-            response += f"📦 Собрано контейнеров: {total_containers}\n"
-            response += f"🏢 Организации: {', '.join(organizations)}\n"
-            response += f"📍 Точек пройдено: {len(progresses)}\n\n"
-        
+        # Отправляем новое сообщение с клавиатурой
         await message.answer(
             text=response,
-            reply_markup=get_main_menu_keyboard()
+            reply_markup=get_route_selection_keyboard(routes_data)
         )
 
 
@@ -1144,3 +1177,362 @@ async def unknown_message(message: Message, state: FSMContext) -> None:
             "🤔 Я не понимаю это сообщение. Используйте кнопки меню или команды.",
             reply_markup=get_main_menu_keyboard()
         )
+
+
+# ==============================================
+# ОБРАБОТЧИКИ ДЛЯ ПРОСМОТРА ИСТОРИИ МАРШРУТОВ
+# ==============================================
+
+@user_router.callback_query(F.data.startswith("view_route:"))
+async def view_route_details(callback: CallbackQuery) -> None:
+    """
+    Обработчик выбора маршрута для детального просмотра.
+    """
+    session_id = callback.data.split(":", 1)[1]
+    
+    async for session in get_session():
+        # Получаем все точки этого маршрута по session_id
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
+        ).where(
+            RouteProgress.route_session_id == session_id
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        # Показываем первую точку маршрута
+        await show_route_point_details(callback, progresses_list, 0, session_id)
+    
+    await callback.answer()
+
+
+async def show_route_point_details(
+    callback: CallbackQuery, 
+    progresses_list: list, 
+    point_index: int, 
+    route_id: str
+) -> None:
+    """
+    Показывает детали конкретной точки маршрута.
+    """
+    if point_index >= len(progresses_list):
+        await callback.answer("❌ Точка не найдена", show_alert=True)
+        return
+    
+    progress = progresses_list[point_index]
+    route = progress.route
+    photos = progress.photos
+    
+    # Формируем сообщение с деталями точки
+    message_text = f"📍 <b>Точка {point_index + 1} из {len(progresses_list)}</b>\n\n"
+    message_text += f"🏢 <b>Организация:</b> {route.organization}\n"
+    message_text += f"📍 <b>Адрес:</b> {route.address}\n"
+    message_text += f"📦 <b>Контейнеров собрано:</b> {progress.containers_count}\n"
+    message_text += f"📅 <b>Дата посещения:</b> {progress.visited_at.strftime('%d.%m.%Y %H:%M')}\n"
+    
+    if progress.notes:
+        message_text += f"\n💬 <b>Комментарий:</b> {progress.notes}\n"
+    
+    if photos:
+        message_text += f"\n📸 <b>Фотографий:</b> {len(photos)} шт."
+    else:
+        message_text += f"\n📸 <b>Фотографий:</b> нет"
+    
+    # Создаем клавиатуру
+    keyboard = get_route_detail_keyboard(
+        route_id=route_id,
+        current_point_index=point_index,
+        total_points=len(progresses_list),
+        has_photos=len(photos) > 0
+    )
+    
+    # Проверяем, является ли текущее сообщение медиа-сообщением
+    if callback.message.photo:
+        # Если это медиа-сообщение, отправляем новое текстовое сообщение
+        await callback.message.answer(
+            text=message_text,
+            reply_markup=keyboard
+        )
+    else:
+        # Если это текстовое сообщение, редактируем его
+        await callback.message.edit_text(
+            text=message_text,
+            reply_markup=keyboard
+        )
+
+
+@user_router.callback_query(F.data.startswith("route_point:"))
+async def navigate_route_point(callback: CallbackQuery) -> None:
+    """
+    Обработчик навигации по точкам маршрута.
+    """
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("❌ Ошибка в данных", show_alert=True)
+        return
+    
+    session_id = parts[1]
+    point_index = int(parts[2])
+    
+    async for session in get_session():
+        # Получаем все точки этого маршрута по session_id
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
+        ).where(
+            RouteProgress.route_session_id == session_id
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        # Показываем выбранную точку
+        await show_route_point_details(callback, progresses_list, point_index, session_id)
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data.startswith("view_photos:"))
+async def view_route_photos(callback: CallbackQuery) -> None:
+    """
+    Обработчик просмотра фотографий точки маршрута.
+    """
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("❌ Ошибка в данных", show_alert=True)
+        return
+    
+    session_id = parts[1]
+    point_index = int(parts[2])
+    
+    async for session in get_session():
+        # Получаем все точки этого маршрута по session_id
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
+        ).where(
+            RouteProgress.route_session_id == session_id
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        if point_index >= len(progresses_list):
+            await callback.answer("❌ Точка не найдена", show_alert=True)
+            return
+        
+        progress = progresses_list[point_index]
+        photos = progress.photos
+        
+        if not photos:
+            await callback.answer("❌ Фотографий нет", show_alert=True)
+            return
+        
+        # Показываем первую фотографию
+        await show_route_photo(callback, photos, 0, session_id, point_index)
+    
+    await callback.answer()
+
+
+async def show_route_photo(
+    callback: CallbackQuery, 
+    photos: list, 
+    photo_index: int, 
+    route_id: str, 
+    point_index: int
+) -> None:
+    """
+    Показывает конкретную фотографию точки маршрута.
+    """
+    if photo_index >= len(photos):
+        await callback.answer("❌ Фотография не найдена", show_alert=True)
+        return
+    
+    photo = photos[photo_index]
+    
+    # Создаем клавиатуру для навигации по фотографиям
+    keyboard = get_photos_viewer_keyboard(
+        route_id=route_id,
+        point_index=point_index,
+        current_photo_index=photo_index,
+        total_photos=len(photos)
+    )
+    
+    # Отправляем фотографию с подписью
+    caption = f"📸 Фотография {photo_index + 1} из {len(photos)}"
+    
+    await callback.message.answer_photo(
+        photo=photo.photo_file_id,
+        caption=caption,
+        reply_markup=keyboard
+    )
+
+
+@user_router.callback_query(F.data.startswith("view_photo:"))
+async def navigate_route_photo(callback: CallbackQuery) -> None:
+    """
+    Обработчик навигации по фотографиям точки маршрута.
+    """
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("❌ Ошибка в данных", show_alert=True)
+        return
+    
+    session_id = parts[1]
+    point_index = int(parts[2])
+    photo_index = int(parts[3])
+    
+    async for session in get_session():
+        # Получаем все точки этого маршрута по session_id
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.photos)
+        ).where(
+            RouteProgress.route_session_id == session_id
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        if point_index >= len(progresses_list):
+            await callback.answer("❌ Точка не найдена", show_alert=True)
+            return
+        
+        progress = progresses_list[point_index]
+        photos = progress.photos
+        
+        if not photos:
+            await callback.answer("❌ Фотографий нет", show_alert=True)
+            return
+        
+        # Показываем выбранную фотографию
+        await show_route_photo(callback, photos, photo_index, session_id, point_index)
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "back_to_routes")
+async def back_to_routes(callback: CallbackQuery) -> None:
+    """
+    Обработчик возврата к списку маршрутов.
+    """
+    # Получаем данные маршрутов напрямую
+    async for session in get_session():
+        # Получаем все маршруты пользователя с детализацией
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
+        ).where(
+            RouteProgress.user_id == callback.from_user.id
+        ).order_by(RouteProgress.visited_at.desc())
+        
+        routes = await session.scalars(stmt)
+        routes_list = routes.all()
+        
+        if not routes_list:
+            # Проверяем, является ли текущее сообщение медиа-сообщением
+            if callback.message.photo:
+                await callback.message.answer(
+                    "📭 У вас пока нет пройденных маршрутов",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            else:
+                await callback.message.edit_text(
+                    "📭 У вас пока нет пройденных маршрутов",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            await callback.answer()
+            return
+        
+        # Группируем по route_session_id
+        routes_summary = {}
+        for route_progress in routes_list:
+            session_id = route_progress.route_session_id
+            date = route_progress.visited_at.strftime("%d.%m.%Y")
+            city = route_progress.route.city_name
+            
+            # Используем session_id как ключ для группировки
+            if session_id not in routes_summary:
+                # Находим время первой точки этого маршрута
+                first_time = min(p.visited_at for p in routes_list if p.route_session_id == session_id)
+                time_start = first_time.strftime("%H:%M")
+                
+                routes_summary[session_id] = {
+                    'route_id': session_id,
+                    'date': date,
+                    'city': city,
+                    'time_start': time_start,
+                    'progresses': []
+                }
+            
+            routes_summary[session_id]['progresses'].append(route_progress)
+        
+        # Сортируем точки в каждом маршруте по времени
+        for route_info in routes_summary.values():
+            route_info['progresses'].sort(key=lambda x: x.visited_at)
+        
+        # Формируем данные для клавиатуры
+        routes_data = []
+        for session_id, route_info in list(routes_summary.items())[:10]:  # Ограничиваем 10 маршрутами
+            progresses = route_info['progresses']
+            total_containers = sum(p.containers_count for p in progresses)
+            points_count = len(progresses)
+            
+            routes_data.append({
+                'route_id': session_id,  # Используем session_id как route_id
+                'date': route_info['date'],
+                'city': route_info['city'],
+                'points_count': points_count,
+                'total_containers': total_containers
+            })
+        
+        # Формируем ответное сообщение
+        response = "📊 <b>Ваши завершенные маршруты:</b>\n\n"
+        response += "Выберите маршрут для детального просмотра:\n"
+        
+        # Проверяем, является ли текущее сообщение медиа-сообщением
+        if callback.message.photo:
+            # Если это медиа-сообщение, отправляем новое текстовое сообщение
+            await callback.message.answer(
+                text=response,
+                reply_markup=get_route_selection_keyboard(routes_data)
+            )
+        else:
+            # Если это текстовое сообщение, редактируем его
+            await callback.message.edit_text(
+                text=response,
+                reply_markup=get_route_selection_keyboard(routes_data)
+            )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "back_to_main_menu")
+async def back_to_main_menu(callback: CallbackQuery) -> None:
+    """
+    Обработчик возврата в главное меню.
+    """
+    # Всегда отправляем новое сообщение, так как ReplyKeyboardMarkup нельзя использовать с edit_text
+    await callback.message.answer(
+        text="🏠 <b>Главное меню</b>\n\nВыберите действие:",
+        reply_markup=get_main_menu_keyboard()
+    )
+    
+    await callback.answer()
