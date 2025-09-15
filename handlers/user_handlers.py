@@ -27,6 +27,7 @@ from utils.progress_bar import format_route_progress, format_route_summary
 # Импорты наших модулей
 from database.database import get_session
 from database.models import User, Route, RouteProgress, Delivery, RoutePhoto
+from utils.callback_manager import parse_callback
 from states.user_states import RouteStates
 from keyboards.user_keyboards import (
     get_main_menu_keyboard,
@@ -1183,12 +1184,17 @@ async def unknown_message(message: Message, state: FSMContext) -> None:
 # ОБРАБОТЧИКИ ДЛЯ ПРОСМОТРА ИСТОРИИ МАРШРУТОВ
 # ==============================================
 
-@user_router.callback_query(F.data.startswith("view_route:"))
+@user_router.callback_query(F.data.startswith("r:"))
 async def view_route_details(callback: CallbackQuery) -> None:
     """
     Обработчик выбора маршрута для детального просмотра.
     """
-    session_id = callback.data.split(":", 1)[1]
+    callback_data = parse_callback(callback.data)
+    if not callback_data or callback_data.get('action') != 'view_route':
+        await callback.answer("Ошибка: неверные данные", show_alert=True)
+        return
+    
+    session_id = callback_data['route_id']
     
     async for session in get_session():
         # Получаем все точки этого маршрута по session_id
@@ -1267,18 +1273,18 @@ async def show_route_point_details(
         )
 
 
-@user_router.callback_query(F.data.startswith("route_point:"))
+@user_router.callback_query(F.data.startswith("rp:"))
 async def navigate_route_point(callback: CallbackQuery) -> None:
     """
     Обработчик навигации по точкам маршрута.
     """
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer("❌ Ошибка в данных", show_alert=True)
+    callback_data = parse_callback(callback.data)
+    if not callback_data or callback_data.get('action') != 'route_point':
+        await callback.answer("Ошибка: неверные данные", show_alert=True)
         return
     
-    session_id = parts[1]
-    point_index = int(parts[2])
+    session_id = callback_data['route_id']
+    point_index = callback_data['point_index']
     
     async for session in get_session():
         # Получаем все точки этого маршрута по session_id
@@ -1382,19 +1388,19 @@ async def show_route_photo(
     )
 
 
-@user_router.callback_query(F.data.startswith("view_photo:"))
+@user_router.callback_query(F.data.startswith("p:"))
 async def navigate_route_photo(callback: CallbackQuery) -> None:
     """
     Обработчик навигации по фотографиям точки маршрута.
     """
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        await callback.answer("❌ Ошибка в данных", show_alert=True)
+    callback_data = parse_callback(callback.data)
+    if not callback_data or callback_data.get('action') != 'view_photo':
+        await callback.answer("Ошибка: неверные данные", show_alert=True)
         return
     
-    session_id = parts[1]
-    point_index = int(parts[2])
-    photo_index = int(parts[3])
+    session_id = callback_data['route_id']
+    point_index = callback_data['point_index']
+    photo_index = callback_data['photo_index']
     
     async for session in get_session():
         # Получаем все точки этого маршрута по session_id

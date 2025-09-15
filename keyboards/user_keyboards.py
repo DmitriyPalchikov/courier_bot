@@ -19,6 +19,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 from config import AVAILABLE_ROUTES
+from utils.callback_manager import create_route_callback, create_route_point_callback, create_photo_callback
 
 
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -473,7 +474,7 @@ def get_route_selection_keyboard(routes_data: list) -> InlineKeyboardMarkup:
         total_containers = route_data['total_containers']
         
         button_text = f"📅 {date} - {city} ({points_count} точек, {total_containers} контейнеров)"
-        callback_data = f"view_route:{route_data['route_id']}"
+        callback_data = create_route_callback(route_data['route_id'])
         
         builder.add(InlineKeyboardButton(
             text=button_text,
@@ -516,20 +517,20 @@ def get_route_detail_keyboard(
     if current_point_index > 0:
         builder.add(InlineKeyboardButton(
             text="⬅️ Предыдущая точка",
-            callback_data=f"route_point:{route_id}:{current_point_index - 1}"
+            callback_data=create_route_point_callback(route_id, current_point_index - 1)
         ))
     
     if current_point_index < total_points - 1:
         builder.add(InlineKeyboardButton(
             text="Следующая точка ➡️",
-            callback_data=f"route_point:{route_id}:{current_point_index + 1}"
+            callback_data=create_route_point_callback(route_id, current_point_index + 1)
         ))
     
     # Кнопка просмотра фотографий (если есть)
     if has_photos:
         builder.add(InlineKeyboardButton(
             text="📸 Просмотреть фотографии",
-            callback_data=f"view_photos:{route_id}:{current_point_index}"
+            callback_data=create_photo_callback(route_id, current_point_index, 0)
         ))
     
     # Кнопка возврата к списку маршрутов
@@ -577,13 +578,13 @@ def get_photos_viewer_keyboard(
     if current_photo_index > 0:
         builder.add(InlineKeyboardButton(
             text="⬅️ Предыдущее фото",
-            callback_data=f"view_photo:{route_id}:{point_index}:{current_photo_index - 1}"
+            callback_data=create_photo_callback(route_id, point_index, current_photo_index - 1)
         ))
     
     if current_photo_index < total_photos - 1:
         builder.add(InlineKeyboardButton(
             text="Следующее фото ➡️",
-            callback_data=f"view_photo:{route_id}:{point_index}:{current_photo_index + 1}"
+            callback_data=create_photo_callback(route_id, point_index, current_photo_index + 1)
         ))
     
     # Информация о текущей фотографии
@@ -595,7 +596,7 @@ def get_photos_viewer_keyboard(
     # Кнопка возврата к деталям маршрута
     builder.add(InlineKeyboardButton(
         text="🔙 К деталям маршрута",
-        callback_data=f"route_point:{route_id}:{point_index}"
+        callback_data=create_route_point_callback(route_id, point_index)
     ))
     
     # Размещаем кнопки
