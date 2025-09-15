@@ -327,6 +327,129 @@ class RoutePhoto(Base):
         return f"<RoutePhoto(id={self.id}, route_progress_id={self.route_progress_id}, order={self.photo_order})>"
 
 
+class LabSummary(Base):
+    """
+    Модель итоговых данных по лабораториям после завершения маршрута.
+    
+    Содержит дополнительные фотографии и комментарии по каждой уникальной
+    лаборатории, которую посетил пользователь в рамках одного маршрута.
+    """
+    __tablename__ = 'lab_summaries'
+    
+    # Уникальный идентификатор записи
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        comment="Уникальный ID записи итогов по лаборатории"
+    )
+    
+    # Связь с пользователем
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey('users.telegram_id', ondelete='CASCADE'),
+        nullable=False,
+        comment="ID пользователя"
+    )
+    
+    # ID сессии маршрута (для связи с конкретным маршрутом)
+    route_session_id: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        comment="ID сессии маршрута"
+    )
+    
+    # Название организации/лаборатории
+    organization: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        comment="Название организации (КДЛ, Ховер, Дартис)"
+    )
+    
+    # Итоговый комментарий по лаборатории
+    summary_comment: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Итоговый комментарий по лаборатории (до 500 символов)"
+    )
+    
+    # Статус заполнения данных по лаборатории
+    is_completed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        comment="Заполнены ли все данные по лаборатории"
+    )
+    
+    # Связь с итоговыми фотографиями лаборатории
+    summary_photos: Mapped[list["LabSummaryPhoto"]] = relationship(
+        "LabSummaryPhoto",
+        back_populates="lab_summary",
+        cascade="all, delete-orphan",
+        order_by="LabSummaryPhoto.photo_order"
+    )
+    
+    def __repr__(self) -> str:
+        """Строковое представление итогов по лаборатории для отладки"""
+        return f"<LabSummary(route_session={self.route_session_id}, org='{self.organization}')>"
+
+
+class LabSummaryPhoto(Base):
+    """
+    Модель для хранения итоговых фотографий лабораторий.
+    
+    Дополнительные фотографии, которые пользователь делает по каждой 
+    лаборатории после завершения всех точек маршрута.
+    """
+    __tablename__ = 'lab_summary_photos'
+    
+    # Уникальный идентификатор фотографии
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        comment="Уникальный ID итоговой фотографии"
+    )
+    
+    # Связь с записью итогов по лаборатории
+    lab_summary_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey('lab_summaries.id', ondelete='CASCADE'),
+        nullable=False,
+        comment="ID записи итогов по лаборатории"
+    )
+    
+    # ID фотографии в Telegram
+    photo_file_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="File ID фотографии в Telegram"
+    )
+    
+    # Порядковый номер фотографии
+    photo_order: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        comment="Порядковый номер фотографии"
+    )
+    
+    # Описание фотографии (опционально)
+    description: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Описание фотографии"
+    )
+    
+    # Связь с итогами по лаборатории
+    lab_summary: Mapped["LabSummary"] = relationship(
+        "LabSummary",
+        back_populates="summary_photos"
+    )
+    
+    def __repr__(self) -> str:
+        """Строковое представление итоговой фотографии для отладки"""
+        return f"<LabSummaryPhoto(id={self.id}, lab_summary_id={self.lab_summary_id}, order={self.photo_order})>"
+
+
 class Delivery(Base):
     """
     Модель доставки в Москву.

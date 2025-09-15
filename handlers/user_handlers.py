@@ -26,7 +26,7 @@ from utils.progress_bar import format_route_progress, format_route_summary
 
 # Импорты наших модулей
 from database.database import get_session
-from database.models import User, Route, RouteProgress, Delivery, RoutePhoto
+from database.models import User, Route, RouteProgress, Delivery, RoutePhoto, LabSummary, LabSummaryPhoto
 from utils.callback_manager import parse_callback
 from states.user_states import RouteStates
 from keyboards.user_keyboards import (
@@ -40,7 +40,11 @@ from keyboards.user_keyboards import (
     get_point_data_management_keyboard,
     get_route_selection_keyboard,
     get_route_detail_keyboard,
-    get_photos_viewer_keyboard
+    get_photos_viewer_keyboard,
+    get_lab_selection_keyboard,
+    get_lab_summary_management_keyboard,
+    get_lab_photos_keyboard,
+    get_lab_comment_confirmation_keyboard
 )
 from config import (
     WELCOME_MESSAGE,
@@ -991,82 +995,112 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
     await callback.answer()
 
 
-@user_router.callback_query(F.data == "complete_route", RouteStates.waiting_for_route_completion)
-async def complete_route(callback: CallbackQuery, state: FSMContext) -> None:
+@user_router.callback_query(F.data == "start_lab_summaries", RouteStates.waiting_for_route_completion)
+async def start_lab_summaries(callback: CallbackQuery, state: FSMContext) -> None:
     """
-    Завершение маршрута и формирование заданий для доставки в Москву.
+    Переход к заполнению итоговых данных по лабораториям.
     
-    Создаёт записи доставок для каждой организации и отправляет
-    уведомления администраторам.
+    Анализирует маршрут, определяет уникальные лаборатории и инициализирует
+    процесс заполнения дополнительных фотографий и комментариев.
     
     Args:
-        callback: Объект callback query от кнопки завершения
+        callback: Объект callback query
         state: Контекст состояния FSM
     """
     state_data = await state.get_data()
-    collected_containers = state_data.get('collected_containers', {})
+    route_session_id = state_data.get('route_session_id')
     selected_city = state_data.get('selected_city')
     
-    # Создаём доставки для каждой организации
+    # Получаем все точки маршрута для определения уникальных лабораторий
+    route_points = AVAILABLE_ROUTES.get(selected_city, [])
+    
+    # Определяем уникальные организации
+    organizations = {}
+    for point in route_points:
+        org = point['organization']
+        if org not in organizations:
+            organizations[org] = {'points_count': 0}
+        organizations[org]['points_count'] += 1
+    
+    # Создаем записи в БД для каждой лаборатории
     async for session in get_session():
-        for organization, containers_count in collected_containers.items():
-            if containers_count > 0:  # Создаём доставку только если есть контейнеры
-                delivery_address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {})
-                
-                delivery = Delivery(
-                    organization=organization,
-                    total_containers=containers_count,
-                    delivery_address=delivery_address.get('address', 'Не указан'),
-                    contact_info=delivery_address.get('contact', 'Не указан'),
-                    status='pending'
+        for organization in organizations.keys():
+            # Проверяем, есть ли уже запись для этой лаборатории
+            existing = await session.scalar(
+                select(LabSummary).where(
+                    LabSummary.route_session_id == route_session_id,
+                    LabSummary.organization == organization,
+                    LabSummary.user_id == callback.from_user.id
                 )
-                session.add(delivery)
+            )
+            
+            if not existing:
+                lab_summary = LabSummary(
+                    user_id=callback.from_user.id,
+                    route_session_id=route_session_id,
+                    organization=organization,
+                    is_completed=False
+                )
+                session.add(lab_summary)
         
         await session.commit()
     
-    # Очищаем состояние
-    await state.clear()
+    # Переходим в состояние выбора лаборатории
+    await state.set_state(RouteStates.selecting_lab_for_summary)
     
-    # Вычисляем общее время прохождения маршрута
-    route_start_time = datetime.fromisoformat(state_data.get('route_start_time'))
-    route_end_time = datetime.now()
-    total_time = route_end_time - route_start_time
+    # Показываем список лабораторий
+    await show_lab_selection(callback, state)
+
+
+async def show_lab_selection(callback: CallbackQuery, state: FSMContext) -> None:
+    """Показывает список лабораторий для заполнения данных."""
+    state_data = await state.get_data()
+    route_session_id = state_data.get('route_session_id')
     
-    # Форматируем время в удобный вид
-    hours = total_time.seconds // 3600
-    minutes = (total_time.seconds % 3600) // 60
-    time_str = f"{hours}ч {minutes}мин"
+    async for session in get_session():
+        # Получаем все лаборатории этого маршрута
+        stmt = select(LabSummary).options(
+            selectinload(LabSummary.summary_photos)
+        ).where(
+            LabSummary.route_session_id == route_session_id,
+            LabSummary.user_id == callback.from_user.id
+        )
+        
+        labs = await session.scalars(stmt)
+        labs_list = labs.all()
+        
+        if not labs_list:
+            await callback.message.edit_text(
+                "❌ Ошибка: не найдены данные по лабораториям",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
+        # Формируем данные для клавиатуры
+        labs_data = []
+        for lab in labs_list:
+            labs_data.append({
+                'organization': lab.organization,
+                'is_completed': lab.is_completed,
+                'points_count': len([p for p in AVAILABLE_ROUTES.get(state_data.get('selected_city', ''), []) 
+                                   if p['organization'] == lab.organization])
+            })
+        
+        # Формируем сообщение
+        completed_count = sum(1 for lab in labs_data if lab['is_completed'])
+        total_count = len(labs_data)
+        
+        message = f"🏥 <b>Заполнение данных по лабораториям</b>\n\n"
+        message += f"📊 Прогресс: {completed_count}/{total_count} лабораторий\n\n"
+        message += "Выберите лабораторию для добавления итоговых фотографий и комментариев:\n\n"
+        message += "⏳ - не заполнено\n✅ - заполнено"
+        
+        await callback.message.edit_text(
+            text=message,
+            reply_markup=get_lab_selection_keyboard(labs_data)
+        )
     
-    # Формируем сообщение с итогами маршрута
-    completion_message = format_route_summary(
-        city=selected_city,
-        total_points=len(AVAILABLE_ROUTES[selected_city]),
-        collected_containers=collected_containers,
-        total_time=time_str
-    )
-    
-    completion_message += "\n\n📋 Автоматически сформированы задания на доставку в Москву:\n"
-    
-    for organization, containers_count in collected_containers.items():
-        if containers_count > 0:
-            address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {}).get('address', 'Не указан')
-            completion_message += f"\n📦 <b>{organization}:</b> {containers_count} контейнеров\n"
-            completion_message += f"🏠 Адрес: {address}"
-    
-    completion_message += "\n\nАдминистраторы получили уведомление о готовности к отправке."
-    
-    await callback.message.edit_text(
-        text=completion_message,
-        reply_markup=None
-    )
-    
-    # Отправляем уведомление в главное меню
-    await callback.message.answer(
-        "🏠 Возвращайтесь в главное меню для выбора нового маршрута",
-        reply_markup=get_main_menu_keyboard()
-    )
-    
-    await callback.answer("Маршрут завершён!")
+    await callback.answer()
 
 
 @user_router.message(F.text == "📊 Мои маршруты")
@@ -1146,37 +1180,6 @@ async def my_routes(message: Message) -> None:
         await message.answer(
             text=response,
             reply_markup=get_route_selection_keyboard(routes_data)
-        )
-
-
-# Обработчик для неопознанных сообщений
-@user_router.message()
-async def unknown_message(message: Message, state: FSMContext) -> None:
-    """
-    Обработчик для всех неопознанных сообщений.
-    
-    Помогает пользователю вернуться к нормальному взаимодействию с ботом.
-    
-    Args:
-        message: Объект неопознанного сообщения
-        state: Контекст состояния FSM
-    """
-    current_state = await state.get_state()
-    
-    if current_state == RouteStates.waiting_for_photo:
-        await message.answer(ERROR_MESSAGES['photo_required'])
-    elif current_state == RouteStates.waiting_for_additional_photos:
-        await message.answer("📸 Отправьте фотографию или воспользуйтесь кнопками выше")
-    elif current_state == RouteStates.waiting_for_containers_count:
-        await message.answer(ERROR_MESSAGES['invalid_containers_count'])
-    elif current_state == RouteStates.waiting_for_comment:
-        await message.answer("📝 Напишите короткий комментарий к этой точке маршрута (максимум 500 символов)")
-    elif current_state == RouteStates.managing_point_data:
-        await message.answer("🔄 Используйте кнопки выше для управления данными точки")
-    else:
-        await message.answer(
-            "🤔 Я не понимаю это сообщение. Используйте кнопки меню или команды.",
-            reply_markup=get_main_menu_keyboard()
         )
 
 
@@ -1542,3 +1545,537 @@ async def back_to_main_menu(callback: CallbackQuery) -> None:
     )
     
     await callback.answer()
+
+
+# ==============================================
+# ОБРАБОТЧИКИ ДЛЯ РАБОТЫ С ЛАБОРАТОРИЯМИ
+# ==============================================
+
+@user_router.callback_query(F.data.startswith("select_lab:"), RouteStates.selecting_lab_for_summary)
+async def select_lab_for_summary(callback: CallbackQuery, state: FSMContext) -> None:
+    """Выбор лаборатории для заполнения итоговых данных."""
+    organization = callback.data.split(":", 1)[1]
+    
+    # Сохраняем выбранную лабораторию в состоянии
+    await state.update_data(selected_lab_organization=organization)
+    await state.set_state(RouteStates.managing_lab_summary)
+    
+    # Показываем интерфейс управления данными лаборатории
+    await show_lab_summary_management(callback, state, organization)
+
+
+async def show_lab_summary_management(callback: CallbackQuery, state: FSMContext, organization: str) -> None:
+    """Показывает интерфейс управления данными лаборатории."""
+    state_data = await state.get_data()
+    route_session_id = state_data.get('route_session_id')
+    
+    async for session in get_session():
+        # Получаем данные лаборатории
+        lab_summary = await session.scalar(
+            select(LabSummary).options(
+                selectinload(LabSummary.summary_photos)
+            ).where(
+                LabSummary.route_session_id == route_session_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if not lab_summary:
+            await callback.answer("Ошибка: лаборатория не найдена", show_alert=True)
+            return
+        
+        # Получаем текущие данные
+        photos_count = len(lab_summary.summary_photos)
+        has_photos = photos_count > 0
+        has_comment = bool(lab_summary.summary_comment)
+        comment_text = lab_summary.summary_comment or ""
+        
+        # Формируем сообщение
+        message = f"🏥 <b>Лаборатория: {organization}</b>\n\n"
+        
+        if has_photos:
+            message += f"📸 Фотографий: {photos_count} ✅\n"
+        else:
+            message += f"📸 Фотографий: не добавлены ⏳\n"
+        
+        if has_comment:
+            comment_preview = comment_text[:50] + "..." if len(comment_text) > 50 else comment_text
+            message += f"📝 Комментарий: {comment_preview} ✅\n"
+        else:
+            message += f"📝 Комментарий: не добавлен (необязательно)\n"
+        
+        message += f"\n{'✅ Готово к завершению' if has_photos else '⚠️ Добавьте хотя бы 1 фотографию'}"
+        
+        await callback.message.edit_text(
+            text=message,
+            reply_markup=get_lab_summary_management_keyboard(
+                has_photos=has_photos,
+                has_comment=has_comment,
+                photos_count=photos_count,
+                comment_text=comment_text,
+                organization=organization
+            )
+        )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "complete_route_final", RouteStates.selecting_lab_for_summary)
+async def complete_route_final(callback: CallbackQuery, state: FSMContext) -> None:
+    """Финальное завершение маршрута после заполнения всех лабораторий."""
+    state_data = await state.get_data()
+    collected_containers = state_data.get('collected_containers', {})
+    selected_city = state_data.get('selected_city')
+    
+    # Создаём доставки для каждой организации
+    async for session in get_session():
+        for organization, containers_count in collected_containers.items():
+            if containers_count > 0:
+                delivery_address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {})
+                
+                delivery = Delivery(
+                    organization=organization,
+                    total_containers=containers_count,
+                    delivery_address=delivery_address.get('address', 'Не указан'),
+                    contact_info=delivery_address.get('contact', 'Не указан'),
+                    status='pending'
+                )
+                session.add(delivery)
+        
+        await session.commit()
+    
+    # Очищаем состояние
+    await state.clear()
+    
+    # Вычисляем общее время прохождения маршрута
+    route_start_time = datetime.fromisoformat(state_data.get('route_start_time'))
+    route_end_time = datetime.now()
+    total_time = route_end_time - route_start_time
+    
+    hours = total_time.seconds // 3600
+    minutes = (total_time.seconds % 3600) // 60
+    time_str = f"{hours}ч {minutes}мин"
+    
+    # Формируем сообщение с итогами
+    completion_message = format_route_summary(
+        city=selected_city,
+        total_points=len(AVAILABLE_ROUTES[selected_city]),
+        collected_containers=collected_containers,
+        total_time=time_str
+    )
+    
+    completion_message += "\n\n🏥 <b>Итоговые данные по лабораториям заполнены!</b>\n"
+    completion_message += "\n📋 Автоматически сформированы задания на доставку в Москву:\n"
+    
+    for organization, containers_count in collected_containers.items():
+        if containers_count > 0:
+            address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {}).get('address', 'Не указан')
+            completion_message += f"\n📦 <b>{organization}:</b> {containers_count} контейнеров\n"
+            completion_message += f"🏠 Адрес: {address}"
+    
+    completion_message += "\n\nАдминистраторы получили уведомление о готовности к отправке."
+    
+    await callback.message.edit_text(
+        text=completion_message,
+        reply_markup=None
+    )
+    
+    await callback.message.answer(
+        "🎉 <b>Маршрут полностью завершен!</b>\n\n"
+        "Спасибо за отличную работу!",
+        reply_markup=get_main_menu_keyboard()
+    )
+    
+    await callback.answer("Маршрут завершён!")
+
+
+@user_router.callback_query(F.data == "add_lab_photos", RouteStates.managing_lab_summary)
+async def add_lab_photos(callback: CallbackQuery, state: FSMContext) -> None:
+    """Начало добавления фотографий лаборатории."""
+    await state.set_state(RouteStates.waiting_for_lab_summary_photos)
+    
+    await callback.message.edit_text(
+        text="📸 <b>Добавление фотографий лаборатории</b>\n\n"
+             "Отправьте фотографии лаборатории (от 1 до 10 фото).\n"
+             "Это могут быть общие фотографии помещения, оборудования или других важных деталей.",
+        reply_markup=get_lab_photos_keyboard(0)
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "edit_lab_photos", RouteStates.managing_lab_summary)
+async def edit_lab_photos(callback: CallbackQuery, state: FSMContext) -> None:
+    """Редактирование фотографий лаборатории."""
+    state_data = await state.get_data()
+    route_session_id = state_data.get('route_session_id')
+    organization = state_data.get('selected_lab_organization')
+    
+    async for session in get_session():
+        # Получаем текущие фотографии
+        lab_summary = await session.scalar(
+            select(LabSummary).options(
+                selectinload(LabSummary.summary_photos)
+            ).where(
+                LabSummary.route_session_id == route_session_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if lab_summary:
+            photos_count = len(lab_summary.summary_photos)
+            await state.set_state(RouteStates.waiting_for_lab_summary_photos)
+            
+            await callback.message.edit_text(
+                text=f"📸 <b>Редактирование фотографий лаборатории</b>\n\n"
+                     f"Текущее количество фотографий: {photos_count}\n"
+                     f"Вы можете добавить еще фотографии или завершить редактирование.",
+                reply_markup=get_lab_photos_keyboard(photos_count)
+            )
+    
+    await callback.answer()
+
+
+@user_router.message(F.photo, RouteStates.waiting_for_lab_summary_photos)
+async def handle_lab_photo(message: Message, state: FSMContext) -> None:
+    """Обработка фотографий лаборатории."""
+    # Отладочная информация
+    logger.info(f"📸 handle_lab_photo вызван для пользователя {message.from_user.id}")
+    
+    state_data = await state.get_data()
+    route_session_id = state_data.get('route_session_id')
+    organization = state_data.get('selected_lab_organization')
+    
+    logger.info(f"📊 State data: route_session_id={route_session_id}, organization={organization}")
+    
+    if not route_session_id or not organization:
+        await message.answer("❌ Ошибка: данные состояния потеряны. Вернитесь к выбору лаборатории.")
+        return
+    
+    async for session in get_session():
+        # Находим запись лаборатории
+        lab_summary = await session.scalar(
+            select(LabSummary).options(
+                selectinload(LabSummary.summary_photos)
+            ).where(
+                LabSummary.route_session_id == route_session_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == message.from_user.id
+            )
+        )
+        
+        if not lab_summary:
+            await message.answer("❌ Ошибка: лаборатория не найдена")
+            return
+        
+        # Проверяем лимит фотографий
+        current_photos_count = len(lab_summary.summary_photos)
+        if current_photos_count >= 10:
+            await message.answer("❌ Максимум 10 фотографий на лабораторию")
+            return
+        
+        # Получаем лучшее качество фото
+        photo = message.photo[-1]
+        
+        # Создаем запись фотографии
+        lab_photo = LabSummaryPhoto(
+            lab_summary_id=lab_summary.id,
+            photo_file_id=photo.file_id,
+            photo_order=current_photos_count + 1
+        )
+        session.add(lab_photo)
+        await session.commit()
+        
+        new_photos_count = current_photos_count + 1
+        
+        await message.answer(
+            f"✅ Фотография {new_photos_count} добавлена!\n\n"
+            f"Всего фотографий: {new_photos_count}/10",
+            reply_markup=get_lab_photos_keyboard(new_photos_count)
+        )
+
+
+@user_router.callback_query(F.data == "finish_lab_photos", RouteStates.waiting_for_lab_summary_photos)
+async def finish_lab_photos(callback: CallbackQuery, state: FSMContext) -> None:
+    """Завершение добавления фотографий."""
+    organization = (await state.get_data()).get('selected_lab_organization')
+    await state.set_state(RouteStates.managing_lab_summary)
+    await show_lab_summary_management(callback, state, organization)
+
+
+@user_router.callback_query(F.data == "add_more_lab_photos", RouteStates.waiting_for_lab_summary_photos)
+async def add_more_lab_photos(callback: CallbackQuery, state: FSMContext) -> None:
+    """Продолжение добавления фотографий."""
+    await callback.message.edit_text(
+        text="📸 <b>Добавление фотографий</b>\n\n"
+             "Отправьте следующую фотографию лаборатории.",
+        reply_markup=None
+    )
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "add_lab_comment", RouteStates.managing_lab_summary)
+async def add_lab_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    """Начало добавления комментария к лаборатории."""
+    await state.set_state(RouteStates.waiting_for_lab_summary_comment)
+    
+    await callback.message.edit_text(
+        text="📝 <b>Добавление комментария к лаборатории</b>\n\n"
+             "Напишите ваш комментарий об этой лаборатории (до 500 символов).\n"
+             "Например: особенности работы, замечания, рекомендации.\n\n"
+             "Комментарий необязателен - вы можете пропустить этот шаг.",
+        reply_markup=get_lab_comment_confirmation_keyboard()
+    )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "edit_lab_comment", RouteStates.managing_lab_summary)
+async def edit_lab_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    """Редактирование комментария к лаборатории."""
+    state_data = await state.get_data()
+    route_session_id = state_data.get('route_session_id')
+    organization = state_data.get('selected_lab_organization')
+    
+    async for session in get_session():
+        # Получаем текущий комментарий
+        lab_summary = await session.scalar(
+            select(LabSummary).where(
+                LabSummary.route_session_id == route_session_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if lab_summary and lab_summary.summary_comment:
+            current_comment = lab_summary.summary_comment
+            preview = current_comment[:100] + "..." if len(current_comment) > 100 else current_comment
+            
+            await state.set_state(RouteStates.waiting_for_lab_summary_comment)
+            await callback.message.edit_text(
+                text=f"📝 <b>Редактирование комментария</b>\n\n"
+                     f"<b>Текущий комментарий:</b>\n{preview}\n\n"
+                     f"Отправьте новый комментарий (до 500 символов) или нажмите 'Отменить' для возврата.",
+                reply_markup=get_lab_comment_confirmation_keyboard()
+            )
+        else:
+            # Если комментария нет, переходим к добавлению
+            await add_lab_comment(callback, state)
+    
+    await callback.answer()
+
+
+@user_router.message(F.text, RouteStates.waiting_for_lab_summary_comment)
+async def handle_lab_comment(message: Message, state: FSMContext) -> None:
+    """Обработка комментария к лаборатории."""
+    comment_text = message.text.strip()
+    
+    # Проверяем длину комментария
+    if len(comment_text) > 500:
+        await message.answer(
+            f"❌ Комментарий слишком длинный!\n"
+            f"Максимум 500 символов, у вас: {len(comment_text)}\n\n"
+            f"Сократите текст и отправьте заново."
+        )
+        return
+    
+    # Сохраняем комментарий в состоянии для подтверждения
+    await state.update_data(pending_lab_comment=comment_text)
+    
+    preview = comment_text[:100] + "..." if len(comment_text) > 100 else comment_text
+    
+    await message.answer(
+        f"📝 <b>Подтверждение комментария:</b>\n\n"
+        f"{preview}\n\n"
+        f"Символов: {len(comment_text)}/500",
+        reply_markup=get_lab_comment_confirmation_keyboard()
+    )
+
+
+@user_router.callback_query(F.data == "save_lab_comment", RouteStates.waiting_for_lab_summary_comment)
+async def save_lab_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    """Сохранение комментария к лаборатории."""
+    state_data = await state.get_data()
+    route_session_id = state_data.get('route_session_id')
+    organization = state_data.get('selected_lab_organization')
+    comment_text = state_data.get('pending_lab_comment', '')
+    
+    async for session in get_session():
+        # Находим запись лаборатории
+        lab_summary = await session.scalar(
+            select(LabSummary).where(
+                LabSummary.route_session_id == route_session_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if lab_summary:
+            lab_summary.summary_comment = comment_text
+            await session.commit()
+    
+    await state.set_state(RouteStates.managing_lab_summary)
+    await show_lab_summary_management(callback, state, organization)
+
+
+@user_router.callback_query(F.data == "cancel_lab_comment", RouteStates.waiting_for_lab_summary_comment)
+async def cancel_lab_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отмена добавления комментария."""
+    organization = (await state.get_data()).get('selected_lab_organization')
+    await state.set_state(RouteStates.managing_lab_summary)
+    await show_lab_summary_management(callback, state, organization)
+
+
+@user_router.callback_query(F.data.startswith("complete_lab:"), RouteStates.managing_lab_summary)
+async def complete_lab_summary(callback: CallbackQuery, state: FSMContext) -> None:
+    """Завершение заполнения данных по лаборатории."""
+    organization = callback.data.split(":", 1)[1]
+    state_data = await state.get_data()
+    route_session_id = state_data.get('route_session_id')
+    
+    async for session in get_session():
+        # Проверяем, что есть хотя бы одно фото
+        lab_summary = await session.scalar(
+            select(LabSummary).options(
+                selectinload(LabSummary.summary_photos)
+            ).where(
+                LabSummary.route_session_id == route_session_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if not lab_summary:
+            await callback.answer("Ошибка: лаборатория не найдена", show_alert=True)
+            return
+        
+        photos_count = len(lab_summary.summary_photos)
+        if photos_count == 0:
+            await callback.answer("⚠️ Добавьте хотя бы одну фотографию лаборатории!", show_alert=True)
+            return
+        
+        # Отмечаем лабораторию как завершенную
+        lab_summary.is_completed = True
+        await session.commit()
+    
+    await state.set_state(RouteStates.selecting_lab_for_summary)
+    await show_lab_selection(callback, state)
+
+
+@user_router.callback_query(F.data == "back_to_lab_selection", RouteStates.managing_lab_summary)
+async def back_to_lab_selection(callback: CallbackQuery, state: FSMContext) -> None:
+    """Возврат к списку лабораторий."""
+    await state.set_state(RouteStates.selecting_lab_for_summary)
+    await show_lab_selection(callback, state)
+
+
+@user_router.callback_query(F.data == "add_first_lab_photo", RouteStates.waiting_for_lab_summary_photos)
+async def add_first_lab_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    """Начало добавления первой фотографии лаборатории."""
+    user_id = callback.from_user.id
+    logger.info(f"🔥 add_first_lab_photo вызван для пользователя {user_id}")
+    
+    # Переходим в состояние ожидания фото
+    await state.set_state(RouteStates.waiting_for_lab_summary_photos)
+    logger.info(f"🎯 Переход в состояние waiting_for_lab_summary_photos")
+    
+    await callback.message.edit_text(
+        text="📸 <b>Добавление первой фотографии</b>\n\n"
+             "Отправьте первую фотографию лаборатории.\n"
+             "После отправки вы сможете добавить до 9 дополнительных фотографий.",
+        reply_markup=None
+    )
+    await callback.answer()
+
+
+@user_router.callback_query(F.data == "remove_last_lab_photo", RouteStates.waiting_for_lab_summary_photos)
+async def remove_last_lab_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    """Удаление последней фотографии лаборатории."""
+    state_data = await state.get_data()
+    route_session_id = state_data.get('route_session_id')
+    organization = state_data.get('selected_lab_organization')
+    
+    async for session in get_session():
+        # Находим запись лаборатории
+        lab_summary = await session.scalar(
+            select(LabSummary).options(
+                selectinload(LabSummary.summary_photos)
+            ).where(
+                LabSummary.route_session_id == route_session_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if not lab_summary:
+            await callback.answer("Ошибка: лаборатория не найдена", show_alert=True)
+            return
+        
+        # Находим последнюю фотографию
+        photos = sorted(lab_summary.summary_photos, key=lambda x: x.photo_order, reverse=True)
+        if photos:
+            last_photo = photos[0]
+            await session.delete(last_photo)
+            await session.commit()
+            
+            remaining_count = len(photos) - 1
+            await callback.message.edit_text(
+                text=f"🗑 Последняя фотография удалена!\n\n"
+                     f"Осталось фотографий: {remaining_count}/10",
+                reply_markup=get_lab_photos_keyboard(remaining_count)
+            )
+        else:
+            await callback.answer("Нет фотографий для удаления", show_alert=True)
+    
+    await callback.answer()
+
+
+# ==============================================
+# ОБЩИЙ ОБРАБОТЧИК ДЛЯ НЕОПОЗНАННЫХ СООБЩЕНИЙ
+# (ДОЛЖЕН БЫТЬ В САМОМ КОНЦЕ!)
+# ==============================================
+
+@user_router.message()
+async def unknown_message(message: Message, state: FSMContext) -> None:
+    """
+    Обработчик для всех неопознанных сообщений.
+    
+    Помогает пользователю вернуться к нормальному взаимодействию с ботом.
+    
+    Args:
+        message: Объект неопознанного сообщения
+        state: Контекст состояния FSM
+    """
+    current_state = await state.get_state()
+    
+    # Отладочная информация
+    logger.info(f"🤔 unknown_message для пользователя {message.from_user.id}")
+    logger.info(f"📱 Тип сообщения: {message.content_type}")
+    logger.info(f"🎯 Текущее состояние: {current_state}")
+    
+    if message.photo:
+        logger.info(f"📸 Получена фотография, но не обработана специальным обработчиком")
+    
+    if current_state == RouteStates.waiting_for_photo:
+        await message.answer(ERROR_MESSAGES['photo_required'])
+    elif current_state == RouteStates.waiting_for_additional_photos:
+        await message.answer("📸 Отправьте фотографию или воспользуйтесь кнопками выше")
+    elif current_state == RouteStates.waiting_for_lab_summary_photos:
+        if message.photo:
+            logger.info(f"📸 Фотография получена в состоянии waiting_for_lab_summary_photos, но не обработана handle_lab_photo")
+            await message.answer("⚠️ Фотография не была обработана. Попробуйте еще раз.")
+        else:
+            await message.answer("📸 Отправьте фотографию лаборатории.")
+    elif current_state == RouteStates.waiting_for_containers_count:
+        await message.answer(ERROR_MESSAGES['invalid_containers_count'])
+    elif current_state == RouteStates.waiting_for_comment:
+        await message.answer("📝 Напишите короткий комментарий к этой точке маршрута (максимум 500 символов)")
+    elif current_state == RouteStates.managing_point_data:
+        await message.answer("🔄 Используйте кнопки выше для управления данными точки")
+    else:
+        await message.answer(
+            "🤔 Я не понимаю это сообщение. Используйте кнопки меню или команды.",
+            reply_markup=get_main_menu_keyboard()
+        )

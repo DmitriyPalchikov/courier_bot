@@ -190,33 +190,22 @@ def get_confirmation_keyboard(confirm_text: str = "✅ Да",
 
 def get_complete_route_keyboard() -> InlineKeyboardMarkup:
     """
-    Создаёт клавиатуру для завершения маршрута.
+    Создаёт клавиатуру для перехода к заполнению итогов по лабораториям.
     
-    Показывается после прохождения всех точек маршрута
-    и предлагает завершить маршрут или вернуться к редактированию.
+    Показывается после прохождения всех точек маршрута.
+    Теперь вместо завершения сразу переходим к заполнению данных по лабораториям.
     
     Returns:
-        InlineKeyboardMarkup: Клавиатура завершения маршрута
+        InlineKeyboardMarkup: Клавиатура для перехода к лабораториям
     """
     builder = InlineKeyboardBuilder()
     
     builder.add(
         InlineKeyboardButton(
-            text="🏁 Завершить маршрут",
-            callback_data="complete_route"
-        ),
-        InlineKeyboardButton(
-            text="📝 Добавить комментарий",
-            callback_data="add_route_comment"
-        ),
-        InlineKeyboardButton(
-            text="❌ Отменить маршрут",
-            callback_data="cancel_route"
+            text="📋 Заполнить данные по лабораториям",
+            callback_data="start_lab_summaries"
         )
     )
-    
-    # Размещаем кнопки: первая отдельно, остальные в одном ряду
-    builder.adjust(1, 2)
     
     return builder.as_markup()
 
@@ -604,5 +593,174 @@ def get_photos_viewer_keyboard(
         builder.adjust(2, 1, 1)  # Навигация в одном ряду
     else:
         builder.adjust(1)  # Все кнопки отдельно
+    
+    return builder.as_markup()
+
+
+def get_lab_selection_keyboard(labs_data: list) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для выбора лаборатории для заполнения итоговых данных.
+    
+    Args:
+        labs_data: Список словарей с данными лабораторий
+        Формат: [{'organization': 'КДЛ', 'is_completed': False, 'points_count': 2}, ...]
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками выбора лабораторий
+    """
+    builder = InlineKeyboardBuilder()
+    
+    for lab_data in labs_data:
+        organization = lab_data['organization']
+        is_completed = lab_data.get('is_completed', False)
+        points_count = lab_data.get('points_count', 0)
+        
+        # Формируем текст кнопки с индикатором статуса
+        status_emoji = "✅" if is_completed else "⏳"
+        button_text = f"{status_emoji} {organization} ({points_count} точек)"
+        
+        builder.add(InlineKeyboardButton(
+            text=button_text,
+            callback_data=f"select_lab:{organization}"
+        ))
+    
+    # Кнопка завершения всех лабораторий (доступна только если все заполнены)
+    all_completed = all(lab['is_completed'] for lab in labs_data)
+    if all_completed:
+        builder.add(InlineKeyboardButton(
+            text="🏁 Завершить маршрут",
+            callback_data="complete_route_final"
+        ))
+    
+    # Размещаем кнопки по одной в ряду
+    builder.adjust(1)
+    
+    return builder.as_markup()
+
+
+def get_lab_summary_management_keyboard(
+    has_photos: bool = False,
+    has_comment: bool = False,
+    photos_count: int = 0,
+    comment_text: str = "",
+    organization: str = ""
+) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для управления итоговыми данными лаборатории.
+    
+    Args:
+        has_photos: Есть ли итоговые фотографии
+        has_comment: Есть ли итоговый комментарий
+        photos_count: Количество фотографий
+        comment_text: Текст комментария (для превью)
+        organization: Название организации
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками управления данными лаборатории
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопка для фотографий
+    if has_photos:
+        photo_text = f"📸 Фото ({photos_count} шт.) ✅"
+        photo_callback = "edit_lab_photos"
+    else:
+        photo_text = "📸 Добавить фотографии лаборатории"
+        photo_callback = "add_lab_photos"
+    
+    builder.add(InlineKeyboardButton(text=photo_text, callback_data=photo_callback))
+    
+    # Кнопка для комментария
+    if has_comment:
+        comment_preview = comment_text[:20] + "..." if len(comment_text) > 20 else comment_text
+        comment_text_btn = f"📝 Комментарий ({comment_preview}) ✅"
+        comment_callback = "edit_lab_comment"
+    else:
+        comment_text_btn = "📝 Добавить комментарий (необязательно)"
+        comment_callback = "add_lab_comment"
+    
+    builder.add(InlineKeyboardButton(text=comment_text_btn, callback_data=comment_callback))
+    
+    # Кнопка "Завершить" - показывается только если есть хотя бы одно фото
+    if has_photos:
+        builder.add(InlineKeyboardButton(
+            text="✅ Завершить данную лабораторию", 
+            callback_data=f"complete_lab:{organization}"
+        ))
+    
+    # Кнопка возврата к списку лабораторий
+    builder.add(InlineKeyboardButton(
+        text="🔙 К списку лабораторий",
+        callback_data="back_to_lab_selection"
+    ))
+    
+    # Размещаем все кнопки по одной в ряду
+    builder.adjust(1)
+    
+    return builder.as_markup()
+
+
+def get_lab_photos_keyboard(photos_count: int) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для управления фотографиями лаборатории.
+    
+    Args:
+        photos_count: Количество уже добавленных фотографий
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками управления фотографиями
+    """
+    builder = InlineKeyboardBuilder()
+    
+    if photos_count > 0:
+        builder.add(
+            InlineKeyboardButton(
+                text=f"✅ Готово ({photos_count} фото)",
+                callback_data="finish_lab_photos"
+            ),
+            InlineKeyboardButton(
+                text="📸 Добавить еще",
+                callback_data="add_more_lab_photos"
+            )
+        )
+        
+        # Если фото больше 1, можно удалить последнее
+        if photos_count > 1:
+            builder.add(InlineKeyboardButton(
+                text="🗑 Удалить последнее фото",
+                callback_data="remove_last_lab_photo"
+            ))
+        
+        builder.adjust(2, 1)
+    else:
+        builder.add(InlineKeyboardButton(
+            text="📸 Добавить первое фото",
+            callback_data="add_first_lab_photo"
+        ))
+    
+    return builder.as_markup()
+
+
+def get_lab_comment_confirmation_keyboard() -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для подтверждения сохранения комментария.
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками подтверждения
+    """
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(
+        InlineKeyboardButton(
+            text="✅ Сохранить комментарий",
+            callback_data="save_lab_comment"
+        ),
+        InlineKeyboardButton(
+            text="❌ Отменить",
+            callback_data="cancel_lab_comment"
+        )
+    )
+    
+    builder.adjust(2)
     
     return builder.as_markup()
