@@ -134,10 +134,17 @@ def get_route_points_keyboard(city_name: str, current_point_index: int = 0) -> I
     
     # Добавляем функциональные кнопки в зависимости от прогресса
     if current_point_index < len(route_points):
-        builder.add(InlineKeyboardButton(
-            text="📸 Загрузить фото",
-            callback_data=f"upload_photo:{current_point_index}"
-        ))
+        # Новые кнопки для обработки/пропуска точки
+        builder.add(
+            InlineKeyboardButton(
+                text="📸 Обработать точку",
+                callback_data=f"process_point:{current_point_index}"
+            ),
+            InlineKeyboardButton(
+                text="⏭️ Пропустить точку",
+                callback_data=f"skip_point:{current_point_index}"
+            )
+        )
     
     # Кнопка завершения маршрута (доступна когда все точки пройдены)
     if current_point_index >= len(route_points):
@@ -443,6 +450,38 @@ def get_point_data_management_keyboard(
     
     # Размещаем все кнопки по одной в ряду
     builder.adjust(1)
+    
+    return builder.as_markup()
+
+
+def get_point_action_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура для выбора действия с точкой маршрута.
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками обработки и пропуска
+    """
+    builder = InlineKeyboardBuilder()
+    
+    builder.add(
+        InlineKeyboardButton(
+            text="📸 Обработать точку",
+            callback_data="process_point"
+        ),
+        InlineKeyboardButton(
+            text="⏭️ Пропустить точку",
+            callback_data="skip_point"
+        )
+    )
+    
+    # Кнопка отмены маршрута
+    builder.add(InlineKeyboardButton(
+        text="❌ Отменить маршрут",
+        callback_data="confirm_cancel_route"
+    ))
+    
+    # Кнопки в одном ряду, отмена отдельно
+    builder.adjust(2, 1)
     
     return builder.as_markup()
 
