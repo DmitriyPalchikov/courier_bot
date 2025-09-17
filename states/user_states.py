@@ -50,6 +50,19 @@ class RouteStates(StatesGroup):
     
     # Все точки маршрута пройдены, ожидаем завершения
     waiting_for_route_completion = State()
+    
+    # НОВЫЕ СОСТОЯНИЯ ДЛЯ РАБОТЫ С ЛАБОРАТОРИЯМИ
+    # Выбор лаборатории для заполнения итоговых данных
+    selecting_lab_for_summary = State()
+    
+    # Ожидание итоговых фотографий лаборатории
+    waiting_for_lab_summary_photos = State()
+    
+    # Ожидание итогового комментария по лаборатории
+    waiting_for_lab_summary_comment = State()
+    
+    # Управление итоговыми данными лаборатории (фото + комментарий)
+    managing_lab_summary = State()
 
 
 class DeliveryStates(StatesGroup):

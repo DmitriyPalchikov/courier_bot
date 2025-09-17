@@ -129,6 +129,106 @@ def parse_callback(callback_data: str) -> Optional[Dict[str, Any]]:
     return get_callback_data(short_id)
 
 
+def create_lab_data_callback(route_id: str) -> str:
+    """
+    Создает callback для просмотра данных лабораторий.
+    
+    Args:
+        route_id: ID маршрута
+        
+    Returns:
+        str: Короткий callback_data
+    """
+    callback_data = {
+        'action': 'view_lab_data',
+        'route_id': route_id
+    }
+    short_id = generate_short_callback(callback_data)
+    return f"ld:{short_id}"
+
+
+def create_specific_lab_callback(route_id: str, organization: str) -> str:
+    """
+    Создает callback для просмотра конкретной лаборатории.
+    
+    Args:
+        route_id: ID маршрута
+        organization: Название лаборатории
+        
+    Returns:
+        str: Короткий callback_data
+    """
+    callback_data = {
+        'action': 'view_route_lab',
+        'route_id': route_id,
+        'organization': organization
+    }
+    short_id = generate_short_callback(callback_data)
+    return f"sl:{short_id}"
+
+
+def create_lab_photo_callback(route_id: str, organization: str, photo_index: int) -> str:
+    """
+    Создает callback для навигации по фотографиям лаборатории.
+    
+    Args:
+        route_id: ID маршрута
+        organization: Название лаборатории
+        photo_index: Индекс фотографии
+        
+    Returns:
+        str: Короткий callback_data
+    """
+    callback_data = {
+        'action': 'lab_photo',
+        'route_id': route_id,
+        'organization': organization,
+        'photo_index': photo_index
+    }
+    short_id = generate_short_callback(callback_data)
+    return f"lp:{short_id}"
+
+
+def create_lab_comment_callback(route_id: str, organization: str) -> str:
+    """
+    Создает callback для просмотра комментария лаборатории.
+    
+    Args:
+        route_id: ID маршрута
+        organization: Название лаборатории
+        
+    Returns:
+        str: Короткий callback_data
+    """
+    callback_data = {
+        'action': 'lab_comment',
+        'route_id': route_id,
+        'organization': organization
+    }
+    short_id = generate_short_callback(callback_data)
+    return f"lc:{short_id}"
+
+
+def create_back_to_route_callback(route_id: str, point_index: int = 0) -> str:
+    """
+    Создает callback для возврата к маршруту.
+    
+    Args:
+        route_id: ID маршрута
+        point_index: Индекс точки
+        
+    Returns:
+        str: Короткий callback_data
+    """
+    callback_data = {
+        'action': 'back_to_route',
+        'route_id': route_id,
+        'point_index': point_index
+    }
+    short_id = generate_short_callback(callback_data)
+    return f"br:{short_id}"
+
+
 def clear_old_callbacks(keep_recent: int = 1000) -> None:
     """
     Очищает старые callback данные, оставляя только последние.
