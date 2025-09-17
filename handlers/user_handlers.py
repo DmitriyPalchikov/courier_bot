@@ -16,7 +16,7 @@ import logging
 from typing import Optional, List
 from datetime import datetime, timedelta
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, PhotoSize
+from aiogram.types import Message, CallbackQuery, PhotoSize, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import select, and_
@@ -27,7 +27,11 @@ from utils.progress_bar import format_route_progress, format_route_summary
 # Импорты наших модулей
 from database.database import get_session
 from database.models import User, Route, RouteProgress, Delivery, RoutePhoto, LabSummary, LabSummaryPhoto
-from utils.callback_manager import parse_callback
+from utils.callback_manager import (
+    parse_callback,
+    create_lab_data_callback, create_specific_lab_callback, create_lab_photo_callback,
+    create_lab_comment_callback, create_back_to_route_callback
+)
 from states.user_states import RouteStates
 from keyboards.user_keyboards import (
     get_main_menu_keyboard,
@@ -44,7 +48,9 @@ from keyboards.user_keyboards import (
     get_lab_selection_keyboard,
     get_lab_summary_management_keyboard,
     get_lab_photos_keyboard,
-    get_lab_comment_confirmation_keyboard
+    get_lab_comment_confirmation_keyboard,
+    get_route_lab_data_keyboard,
+    get_lab_data_viewer_keyboard
 )
 from config import (
     WELCOME_MESSAGE,
@@ -1253,12 +1259,32 @@ async def show_route_point_details(
     else:
         message_text += f"\n📸 <b>Фотографий:</b> нет"
     
+    # Проверяем наличие итоговых данных по лабораториям для этого маршрута
+    async for session in get_session():
+        lab_summaries = await session.scalars(
+            select(LabSummary).options(
+                selectinload(LabSummary.summary_photos)
+            ).where(
+                LabSummary.route_session_id == route_id,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        lab_summaries_list = lab_summaries.all()
+    
+    # Добавляем информацию о лабораториях, если есть
+    has_lab_data = len(lab_summaries_list) > 0
+    if has_lab_data:
+        completed_labs = sum(1 for lab in lab_summaries_list if lab.is_completed)
+        total_labs = len(lab_summaries_list)
+        message_text += f"\n\n🏥 <b>Итоговые данные по лабораториям:</b> {completed_labs}/{total_labs}"
+    
     # Создаем клавиатуру
     keyboard = get_route_detail_keyboard(
         route_id=route_id,
         current_point_index=point_index,
         total_points=len(progresses_list),
-        has_photos=len(photos) > 0
+        has_photos=len(photos) > 0,
+        has_lab_data=has_lab_data
     )
     
     # Проверяем, является ли текущее сообщение медиа-сообщением
@@ -2028,6 +2054,322 @@ async def remove_last_lab_photo(callback: CallbackQuery, state: FSMContext) -> N
             )
         else:
             await callback.answer("Нет фотографий для удаления", show_alert=True)
+    
+    await callback.answer()
+
+
+# ==============================================
+# ОБРАБОТЧИКИ ДЛЯ ПРОСМОТРА ДАННЫХ ЛАБОРАТОРИЙ В МАРШРУТАХ
+# ==============================================
+
+@user_router.callback_query(F.data.startswith("ld:"))
+async def view_route_lab_data(callback: CallbackQuery) -> None:
+    """
+    Отображает список лабораторий с их итоговыми данными.
+    """
+    callback_data = parse_callback(callback.data)
+    if not callback_data or callback_data.get('action') != 'view_lab_data':
+        await callback.answer("Ошибка: неверные данные", show_alert=True)
+        return
+    
+    route_id = callback_data['route_id']
+    logger.info(f"🏥 view_route_lab_data вызван для маршрута {route_id}")
+    
+    async for session in get_session():
+        # Получаем все лаборатории этого маршрута
+        stmt = select(LabSummary).options(
+            selectinload(LabSummary.summary_photos)
+        ).where(
+            LabSummary.route_session_id == route_id,
+            LabSummary.user_id == callback.from_user.id
+        )
+        
+        labs = await session.scalars(stmt)
+        labs_list = labs.all()
+        
+        if not labs_list:
+            await callback.answer("❌ Лабораторные данные не найдены", show_alert=True)
+            return
+        
+        # Формируем данные для клавиатуры
+        labs_data = []
+        for lab in labs_list:
+            labs_data.append({
+                'organization': lab.organization,
+                'photos_count': len(lab.summary_photos),
+                'has_comment': bool(lab.summary_comment)
+            })
+        
+        # Формируем сообщение
+        message_text = f"🏥 <b>Итоговые данные по лабораториям</b>\n\n"
+        
+        for lab_data in labs_data:
+            organization = lab_data['organization']
+            photos_count = lab_data['photos_count']
+            has_comment = lab_data['has_comment']
+            
+            message_text += f"🏢 <b>{organization}</b>\n"
+            message_text += f"   📸 Фотографий: {photos_count}\n"
+            message_text += f"   📝 Комментарий: {'\u2705' if has_comment else '\u2796'}\n\n"
+        
+        message_text += "👆 Нажмите на лабораторию для просмотра фотографий и комментариев"
+        
+        # Создаем клавиатуру
+        keyboard = get_route_lab_data_keyboard(route_id, labs_data)
+        
+        # Проверяем, является ли текущее сообщение медиа-сообщением
+        if callback.message.photo:
+            # Если это медиа-сообщение, отправляем новое текстовое сообщение
+            await callback.message.answer(
+                text=message_text,
+                reply_markup=keyboard
+            )
+        else:
+            # Если это текстовое сообщение, редактируем его
+            await callback.message.edit_text(
+                text=message_text,
+                reply_markup=keyboard
+            )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data.startswith("sl:"))
+async def view_specific_lab_data(callback: CallbackQuery) -> None:
+    """
+    Отображает данные конкретной лаборатории.
+    """
+    callback_data = parse_callback(callback.data)
+    if not callback_data or callback_data.get('action') != 'view_route_lab':
+        await callback.answer("Ошибка: неверные данные", show_alert=True)
+        return
+    
+    route_id = callback_data['route_id']
+    organization = callback_data['organization']
+    
+    logger.info(f"🏥 view_specific_lab_data вызван для {organization} в маршруте {route_id}")
+    
+    async for session in get_session():
+        # Получаем данные лаборатории
+        lab_summary = await session.scalar(
+            select(LabSummary).options(
+                selectinload(LabSummary.summary_photos)
+            ).where(
+                LabSummary.route_session_id == route_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if not lab_summary:
+            await callback.answer("❌ Лаборатория не найдена", show_alert=True)
+            return
+        
+        photos = lab_summary.summary_photos
+        total_photos = len(photos)
+        has_comment = bool(lab_summary.summary_comment)
+        
+        if total_photos > 0:
+            # Показываем первую фотографию
+            await show_lab_photo(callback, route_id, organization, 0)
+        else:
+            # Нет фотографий, показываем только комментарий (если есть)
+            message_text = f"🏥 <b>{organization}</b>\n\n"
+            
+            if has_comment:
+                message_text += f"📝 <b>Комментарий:</b>\n{lab_summary.summary_comment}\n\n"
+            else:
+                message_text += "📝 Комментарий не добавлен\n\n"
+            
+            message_text += "📸 Фотографии не добавлены"
+            
+            keyboard = get_lab_data_viewer_keyboard(
+                route_id=route_id,
+                organization=organization,
+                current_photo_index=0,
+                total_photos=0,
+                has_comment=has_comment
+            )
+            
+            await callback.message.edit_text(
+                text=message_text,
+                reply_markup=keyboard
+            )
+    
+    await callback.answer()
+
+
+async def show_lab_photo(
+    callback: CallbackQuery,
+    route_id: str,
+    organization: str,
+    photo_index: int
+) -> None:
+    """
+    Показывает конкретную фотографию лаборатории.
+    """
+    async for session in get_session():
+        lab_summary = await session.scalar(
+            select(LabSummary).options(
+                selectinload(LabSummary.summary_photos)
+            ).where(
+                LabSummary.route_session_id == route_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if not lab_summary or not lab_summary.summary_photos:
+            await callback.answer("❌ Фотографии не найдены", show_alert=True)
+            return
+        
+        photos = sorted(lab_summary.summary_photos, key=lambda x: x.photo_order)
+        total_photos = len(photos)
+        
+        if photo_index >= total_photos:
+            await callback.answer("❌ Фотография не найдена", show_alert=True)
+            return
+        
+        photo = photos[photo_index]
+        has_comment = bool(lab_summary.summary_comment)
+        
+        # Формируем подпись
+        caption = f"🏥 <b>{organization}</b>\n\n"
+        caption += f"📸 Фотография {photo_index + 1} из {total_photos}\n\n"
+        
+        if photo.description:
+            caption += f"📝 Описание: {photo.description}\n\n"
+        
+        # Создаем клавиатуру
+        keyboard = get_lab_data_viewer_keyboard(
+            route_id=route_id,
+            organization=organization,
+            current_photo_index=photo_index,
+            total_photos=total_photos,
+            has_comment=has_comment
+        )
+        
+        # Отправляем фотографию
+        await callback.message.answer_photo(
+            photo=photo.photo_file_id,
+            caption=caption,
+            reply_markup=keyboard
+        )
+
+
+@user_router.callback_query(F.data.startswith("lp:"))
+async def navigate_lab_photo(callback: CallbackQuery) -> None:
+    """
+    Навигация по фотографиям лаборатории.
+    """
+    callback_data = parse_callback(callback.data)
+    if not callback_data or callback_data.get('action') != 'lab_photo':
+        await callback.answer("Ошибка: неверные данные", show_alert=True)
+        return
+    
+    route_id = callback_data['route_id']
+    organization = callback_data['organization']
+    photo_index = callback_data['photo_index']
+    
+    logger.info(f"📸 navigate_lab_photo: {organization}, фото {photo_index}")
+    
+    await show_lab_photo(callback, route_id, organization, photo_index)
+    await callback.answer()
+
+
+@user_router.callback_query(F.data.startswith("lc:"))
+async def show_lab_comment(callback: CallbackQuery) -> None:
+    """
+    Показывает комментарий лаборатории.
+    """
+    callback_data = parse_callback(callback.data)
+    if not callback_data or callback_data.get('action') != 'lab_comment':
+        await callback.answer("Ошибка: неверные данные", show_alert=True)
+        return
+    
+    route_id = callback_data['route_id']
+    organization = callback_data['organization']
+    
+    logger.info(f"📝 show_lab_comment: {organization}")
+    
+    async for session in get_session():
+        lab_summary = await session.scalar(
+            select(LabSummary).where(
+                LabSummary.route_session_id == route_id,
+                LabSummary.organization == organization,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        
+        if not lab_summary or not lab_summary.summary_comment:
+            await callback.answer("❌ Комментарий не найден", show_alert=True)
+            return
+        
+        # Формируем сообщение с комментарием
+        message_text = f"🏥 <b>{organization}</b>\n\n"
+        message_text += f"📝 <b>Комментарий:</b>\n\n"
+        message_text += f"{lab_summary.summary_comment}"
+        
+        # Кнопка возврата
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=create_specific_lab_callback(route_id, organization)
+                )
+            ]]
+        )
+        
+        # Проверяем тип сообщения
+        if callback.message.photo:
+            # Если это медиа-сообщение, отправляем новое
+            await callback.message.answer(
+                text=message_text,
+                reply_markup=keyboard
+            )
+        else:
+            # Если это текстовое сообщение, редактируем
+            await callback.message.edit_text(
+                text=message_text,
+                reply_markup=keyboard
+            )
+    
+    await callback.answer()
+
+
+@user_router.callback_query(F.data.startswith("br:"))
+async def back_to_route_details(callback: CallbackQuery) -> None:
+    """
+    Возвращает к деталям маршрута.
+    """
+    callback_data = parse_callback(callback.data)
+    if not callback_data or callback_data.get('action') != 'back_to_route':
+        await callback.answer("Ошибка: неверные данные", show_alert=True)
+        return
+    
+    route_id = callback_data['route_id']
+    point_index = callback_data.get('point_index', 0)
+    
+    logger.info(f"⬅️ back_to_route_details: {route_id}, точка {point_index}")
+    
+    # Получаем все точки маршрута
+    async for session in get_session():
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
+        ).where(
+            RouteProgress.route_session_id == route_id
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        # Показываем детали точки маршрута
+        await show_route_point_details(callback, progresses_list, point_index, route_id)
     
     await callback.answer()
 
