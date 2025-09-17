@@ -50,7 +50,8 @@ from keyboards.user_keyboards import (
     get_lab_photos_keyboard,
     get_lab_comment_confirmation_keyboard,
     get_route_lab_data_keyboard,
-    get_lab_data_viewer_keyboard
+    get_lab_data_viewer_keyboard,
+    get_point_action_keyboard
 )
 from config import (
     WELCOME_MESSAGE,
@@ -284,11 +285,11 @@ async def confirm_route_start(callback: CallbackQuery, state: FSMContext) -> Non
         collected_containers={},
         completed_points=0  # На первой точке еще ничего не завершено
     )
-    point_info += "\n\n📸 Сделайте фотографию в данной точке"
+    point_info += "\n\n🎯 Выберите действие с данной точкой:"
     
     await callback.message.edit_text(
         text=point_info,
-        reply_markup=None
+        reply_markup=get_point_action_keyboard()
     )
     
     await callback.answer("Маршрут начат!")
@@ -402,12 +403,12 @@ async def back_to_route(callback: CallbackQuery, state: FSMContext) -> None:
             f"📍 <b>Текущая точка маршрута:</b>\n\n"
             f"🏢 <b>Организация:</b> {current_point['organization']}\n"
             f"🏠 <b>Адрес:</b> {current_point['address']}\n\n"
-            f"📸 Сделайте фотографию в данной точке"
+            f"🎯 Выберите действие с данной точкой:"
         )
         
         await callback.message.edit_text(
             text=point_info,
-            reply_markup=None
+            reply_markup=get_point_action_keyboard()
         )
     else:
         await callback.message.edit_text(
@@ -973,9 +974,12 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
             collected_containers=collected_containers,
             completed_points=completed_points  # Передаем количество завершенных точек
         )
-        point_info = f"✅ Точка завершена! Собрано контейнеров: {containers_count}, фото: {len(photos_list)}\n💬 Комментарий: {comment}\n\n{point_info}\n\n📸 Сделайте фотографию в данной точке"
+        point_info = f"✅ Точка завершена! Собрано контейнеров: {containers_count}, фото: {len(photos_list)}\n💬 Комментарий: {comment}\n\n{point_info}\n\n🎯 Выберите действие с данной точкой:"
         
-        await callback.message.answer(point_info)
+        await callback.message.answer(
+            text=point_info,
+            reply_markup=get_point_action_keyboard()
+        )
         
     else:
         # Все точки пройдены, переходим к завершению маршрута
@@ -1028,9 +1032,30 @@ async def start_lab_summaries(callback: CallbackQuery, state: FSMContext) -> Non
             organizations[org] = {'points_count': 0}
         organizations[org]['points_count'] += 1
     
-    # Создаем записи в БД для каждой лаборатории
+    # Создаем записи в БД только для тех лабораторий, где есть НЕ ПРОПУЩЕННЫЕ точки
     async for session in get_session():
-        for organization in organizations.keys():
+        # Получаем все записи прогресса для этого маршрута
+        route_progresses = await session.scalars(
+            select(RouteProgress).options(
+                selectinload(RouteProgress.route)
+            ).where(
+                RouteProgress.route_session_id == route_session_id,
+                RouteProgress.user_id == callback.from_user.id
+            )
+        )
+        
+        # Группируем по организациям и проверяем, есть ли хотя бы одна НЕ пропущенная точка
+        organizations_with_processed_points = {}
+        for progress in route_progresses:
+            org = progress.route.organization
+            # Если точка НЕ пропущена (completed или pending), добавляем организацию
+            if hasattr(progress, 'status') and progress.status != 'skipped':
+                organizations_with_processed_points[org] = True
+            elif not hasattr(progress, 'status'):  # Старые записи без поля status считаем обработанными
+                organizations_with_processed_points[org] = True
+        
+        # Создаем записи только для организаций с обработанными точками
+        for organization in organizations_with_processed_points.keys():
             # Проверяем, есть ли уже запись для этой лаборатории
             existing = await session.scalar(
                 select(LabSummary).where(
@@ -1050,6 +1075,21 @@ async def start_lab_summaries(callback: CallbackQuery, state: FSMContext) -> Non
                 session.add(lab_summary)
         
         await session.commit()
+    
+    # Проверяем, остались ли лаборатории для заполнения
+    async for session in get_session():
+        lab_summaries = await session.scalars(
+            select(LabSummary).where(
+                LabSummary.route_session_id == route_session_id,
+                LabSummary.user_id == callback.from_user.id
+            )
+        )
+        lab_summaries_list = lab_summaries.all()
+    
+    if not lab_summaries_list:
+        # Нет лабораторий для заполнения (все точки пропущены), сразу завершаем маршрут
+        await complete_route_final(callback, state)
+        return
     
     # Переходим в состояние выбора лаборатории
     await state.set_state(RouteStates.selecting_lab_for_summary)
@@ -1254,10 +1294,15 @@ async def show_route_point_details(
     if progress.notes:
         message_text += f"\n💬 <b>Комментарий:</b> {progress.notes}\n"
     
-    if photos:
-        message_text += f"\n📸 <b>Фотографий:</b> {len(photos)} шт."
+    # Отображаем информацию о статусе точки
+    if hasattr(progress, 'status') and progress.status == 'skipped':
+        message_text += f"\n\n⏭️ <b>Статус:</b> Пропущена\n"
+        message_text += f"📸 <b>Фотографий:</b> нет (точка пропущена)"
     else:
-        message_text += f"\n📸 <b>Фотографий:</b> нет"
+        if photos:
+            message_text += f"\n📸 <b>Фотографий:</b> {len(photos)} шт."
+        else:
+            message_text += f"\n📸 <b>Фотографий:</b> нет"
     
     # Проверяем наличие итоговых данных по лабораториям для этого маршрута
     async for session in get_session():
@@ -1691,16 +1736,26 @@ async def complete_route_final(callback: CallbackQuery, state: FSMContext) -> No
         total_time=time_str
     )
     
-    completion_message += "\n\n🏥 <b>Итоговые данные по лабораториям заполнены!</b>\n"
-    completion_message += "\n📋 Автоматически сформированы задания на доставку в Москву:\n"
+    # Проверяем, есть ли контейнеры для доставки
+    has_containers = any(count > 0 for count in collected_containers.values())
     
-    for organization, containers_count in collected_containers.items():
-        if containers_count > 0:
-            address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {}).get('address', 'Не указан')
-            completion_message += f"\n📦 <b>{organization}:</b> {containers_count} контейнеров\n"
-            completion_message += f"🏠 Адрес: {address}"
+    if has_containers:
+        completion_message += "\n\n🏥 <b>Итоговые данные по лабораториям заполнены!</b>\n"
+        completion_message += "\n📋 Автоматически сформированы задания на доставку в Москву:\n"
+    else:
+        completion_message += "\n\n⚠️ <b>Все точки маршрута были пропущены!</b>\n"
+        completion_message += "\n📋 Нет контейнеров для доставки в Москву.\n"
     
-    completion_message += "\n\nАдминистраторы получили уведомление о готовности к отправке."
+    if has_containers:
+        for organization, containers_count in collected_containers.items():
+            if containers_count > 0:
+                address = MOSCOW_DELIVERY_ADDRESSES.get(organization, {}).get('address', 'Не указан')
+                completion_message += f"\n📦 <b>{organization}:</b> {containers_count} контейнеров\n"
+                completion_message += f"🏠 Адрес: {address}"
+        
+        completion_message += "\n\nАдминистраторы получили уведомление о готовности к отправке."
+    else:
+        completion_message += "\nМаршрут завершен, но никаких контейнеров не было собрано."
     
     await callback.message.edit_text(
         text=completion_message,
@@ -2056,6 +2111,132 @@ async def remove_last_lab_photo(callback: CallbackQuery, state: FSMContext) -> N
             await callback.answer("Нет фотографий для удаления", show_alert=True)
     
     await callback.answer()
+
+
+# ==============================================
+# ОБРАБОТЧИКИ ОБРАБОТКИ И ПРОПУСКА ТОЧЕК МАРШРУТА
+# ==============================================
+
+@user_router.callback_query(F.data == "process_point", RouteStates.waiting_for_photo)
+async def process_point(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки 'Обработать точку'.
+    
+    Переводит пользователя к загрузке фотографий.
+    """
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    
+    if not current_point:
+        await callback.answer("❌ Ошибка: точка не найдена", show_alert=True)
+        return
+    
+    # Переходим к загрузке фото
+    point_info = (
+        f"📍 <b>Обработка точки:</b>\n\n"
+        f"🏢 <b>Организация:</b> {current_point['organization']}\n"
+        f"🏠 <b>Адрес:</b> {current_point['address']}\n\n"
+        f"📸 Отправьте фотографию с данной точки"
+    )
+    
+    await callback.message.edit_text(
+        text=point_info,
+        reply_markup=None
+    )
+    await callback.answer("📸 Отправьте фотографию")
+
+
+@user_router.callback_query(F.data == "skip_point", RouteStates.waiting_for_photo)
+async def skip_point(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки 'Пропустить точку'.
+    
+    Пропускает текущую точку и переходит к следующей.
+    """
+    state_data = await state.get_data()
+    current_point = state_data.get('current_point')
+    route_points = state_data.get('route_points', [])
+    current_point_index = state_data.get('current_point_index', 0)
+    selected_city = state_data.get('selected_city')
+    route_session_id = state_data.get('route_session_id')
+    collected_containers = state_data.get('collected_containers', {})
+    completed_points = state_data.get('completed_points', 0)
+    
+    if not current_point or not route_session_id:
+        await callback.answer("❌ Ошибка: данные маршрута не найдены", show_alert=True)
+        return
+    
+    # Сохраняем пропущенную точку в базу данных
+    from database.models import Route, RouteProgress
+    from database.database import get_session
+    from sqlalchemy import select
+    
+    async for session in get_session():
+        # Находим соответствующую запись в таблице routes
+        stmt = select(Route).where(
+            Route.city_name == selected_city,
+            Route.organization == current_point['organization'],
+            Route.point_name == current_point['name']
+        )
+        route_record = await session.scalar(stmt)
+        
+        if route_record:
+            # Создаем запись о пропущенной точке
+            progress_record = RouteProgress(
+                user_id=callback.from_user.id,
+                route_id=route_record.id,
+                route_session_id=route_session_id,
+                containers_count=0,  # Пропущенная точка - 0 контейнеров
+                status='skipped',  # Отмечаем как пропущенную
+                notes=f"Точка пропущена пользователем"
+            )
+            session.add(progress_record)
+            await session.commit()
+    
+    # Переходим к следующей точке
+    next_point_index = current_point_index + 1
+    
+    if next_point_index < len(route_points):
+        # Переходим к следующей точке
+        next_point = route_points[next_point_index]
+        
+        # Обновляем состояние
+        await state.update_data(
+            current_point=next_point,
+            current_point_index=next_point_index,
+            completed_points=completed_points + 1  # Увеличиваем счетчик (пропущенная = обработанная)
+        )
+        
+        # Показываем следующую точку
+        point_info = format_route_progress(
+            city=selected_city,
+            current_point=next_point,
+            total_points=len(route_points),
+            current_index=next_point_index,
+            collected_containers=collected_containers,
+            completed_points=completed_points + 1
+        )
+        point_info += "\n\n🎯 Выберите действие с данной точкой:"
+        
+        await callback.message.edit_text(
+            text=point_info,
+            reply_markup=get_point_action_keyboard()
+        )
+        await callback.answer(f"⏭️ Точка пропущена! Переход к следующей")
+        
+    else:
+        # Все точки пройдены, переходим к завершению маршрута
+        await state.set_state(RouteStates.waiting_for_route_completion)
+        
+        await callback.message.edit_text(
+            text=f"🏁 <b>Маршрут завершен!</b>\n\n"
+                 f"📍 Последняя точка пропущена\n"
+                 f"📅 Время завершения: {datetime.now().strftime('%H:%M')}\n\n"
+                 f"Для полного завершения нужно заполнить \n"
+                 f"итоговые данные по лабораториям.",
+            reply_markup=get_complete_route_keyboard()
+        )
+        await callback.answer("🏁 Маршрут завершен!")
 
 
 # ==============================================
