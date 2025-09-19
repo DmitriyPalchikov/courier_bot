@@ -486,12 +486,14 @@ def get_point_action_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_route_selection_keyboard(routes_data: list) -> InlineKeyboardMarkup:
+def get_route_selection_keyboard(routes_data: list, has_more: bool = False, offset: int = 0) -> InlineKeyboardMarkup:
     """
     Создает клавиатуру для выбора маршрута из истории.
     
     Args:
         routes_data: Список словарей с данными маршрутов
+        has_more: Есть ли еще маршруты для загрузки
+        offset: Текущий сдвиг для пагинации
     
     Returns:
         InlineKeyboardMarkup с кнопками выбора маршрутов
@@ -511,6 +513,13 @@ def get_route_selection_keyboard(routes_data: list) -> InlineKeyboardMarkup:
         builder.add(InlineKeyboardButton(
             text=button_text,
             callback_data=callback_data
+        ))
+    
+    # Кнопка "Показать еще" если есть больше маршрутов
+    if has_more:
+        builder.add(InlineKeyboardButton(
+            text="📋 Показать еще",
+            callback_data=f"load_more_routes:{offset + len(routes_data)}"
         ))
     
     # Кнопка возврата в главное меню
