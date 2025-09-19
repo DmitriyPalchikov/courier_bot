@@ -466,7 +466,7 @@ async def photo_received(message: Message, state: FSMContext) -> None:
             has_containers=False,
             has_comment=False,
             photos_count=len(photos_list),
-            containers_count=0,
+            containers_count=None,
             comment_text=""
         )
     )
@@ -574,7 +574,7 @@ async def finish_photos(callback: CallbackQuery, state: FSMContext) -> None:
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
     photos_list = state_data.get('photos_list', [])
-    containers_count = state_data.get('containers_count', 0)
+    containers_count = state_data.get('containers_count', None)
     comment = state_data.get('comment', '')
     
     # Переводим в состояние управления данными точки
@@ -586,7 +586,7 @@ async def finish_photos(callback: CallbackQuery, state: FSMContext) -> None:
         status_text,
         reply_markup=get_point_data_management_keyboard(
             has_photos=len(photos_list) > 0,
-            has_containers=containers_count >= 0,
+            has_containers=containers_count is not None,
             has_comment=bool(comment),
             photos_count=len(photos_list),
             containers_count=containers_count,
@@ -680,7 +680,7 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
     photos_list = state_data.get('photos_list', [])
-    containers_count = state_data.get('containers_count', 0)
+    containers_count = state_data.get('containers_count', None)
     
     # Сохраняем комментарий в состоянии
     await state.update_data(comment=comment)
@@ -695,7 +695,7 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
         f"✅ Комментарий сохранен!\n\n" + status_text,
         reply_markup=get_point_data_management_keyboard(
             has_photos=len(photos_list) > 0,
-            has_containers=containers_count >= 0,
+            has_containers=containers_count is not None,
             has_comment=True,
             photos_count=len(photos_list),
             containers_count=containers_count,
@@ -713,17 +713,17 @@ def _get_point_status_text(state_data: dict, current_point: dict) -> str:
     Формирует текст со статусом заполнения данных точки.
     """
     photos_list = state_data.get('photos_list', [])
-    containers_count = state_data.get('containers_count', 0)
+    containers_count = state_data.get('containers_count', None)
     comment = state_data.get('comment', '')
     
     status_text = f"📍 Точка: <b>{current_point['name']}</b>\n"
     status_text += f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
     status_text += "📊 Статус заполнения:\n"
     status_text += f"📸 Фото: {'✅' if photos_list else '❌'} ({len(photos_list)} шт.)\n"
-    status_text += f"📦 Контейнеры: {'✅' if containers_count >= 0 else '❌'} ({containers_count} шт.)\n"
+    status_text += f"📦 Контейнеры: {'✅' if containers_count is not None else '❌'} ({containers_count if containers_count is not None else '—'} шт.)\n"
     status_text += f"📝 Комментарий: {'✅' if comment else '❌'}\n\n"
     
-    if photos_list and containers_count >= 0 and comment:
+    if photos_list and containers_count is not None and comment:
         status_text += "🚀 Все данные заполнены! Можете продолжить маршрут."
     else:
         status_text += "⚠️ Заполните все необходимые данные для продолжения."
@@ -804,13 +804,13 @@ async def edit_containers_from_management(callback: CallbackQuery, state: FSMCon
     
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
-    current_containers = state_data.get('containers_count', 0)
+    current_containers = state_data.get('containers_count', None)
     
     await callback.message.edit_text(
         f"📦 Изменение количества контейнеров\n\n"
         f"📍 Точка: <b>{current_point['name']}</b>\n"
         f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
-        f"Текущее количество: {current_containers}\n"
+        f"Текущее количество: {current_containers if current_containers is not None else 'не указано'}\n"
         f"Введите новое число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
     )
     
@@ -874,12 +874,12 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
     current_point_index = state_data.get('current_point_index', 0)
     total_points = state_data.get('total_points', 0)
     collected_containers = state_data.get('collected_containers', {})
-    containers_count = state_data.get('containers_count', 0)
+    containers_count = state_data.get('containers_count', None)
     comment = state_data.get('comment', '')
     route_session_id = state_data.get('route_session_id')
     
     # Проверяем, что все данные заполнены
-    if not photos_list or containers_count < 0 or not comment:
+    if not photos_list or containers_count is None or not comment:
         await callback.answer("❌ Заполните все необходимые данные!", show_alert=True)
         return
     
@@ -959,7 +959,7 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
             current_point=next_point,
             current_point_index=next_point_index,
             photos_list=[],  # Очищаем список фотографий для новой точки
-            containers_count=0,  # Очищаем количество контейнеров для новой точки
+            containers_count=None,  # Очищаем количество контейнеров для новой точки
             comment=""  # Очищаем комментарий для новой точки
         )
         

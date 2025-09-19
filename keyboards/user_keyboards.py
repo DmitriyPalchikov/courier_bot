@@ -387,7 +387,7 @@ def get_point_data_management_keyboard(
     has_containers: bool = False, 
     has_comment: bool = False,
     photos_count: int = 0,
-    containers_count: int = 0,
+    containers_count: int = None,
     comment_text: str = ""
 ) -> InlineKeyboardMarkup:
     """
@@ -421,7 +421,7 @@ def get_point_data_management_keyboard(
     
     # Кнопка для контейнеров
     if has_containers:
-        containers_text = f"📦 Контейнеры ({containers_count} шт.) ✅"
+        containers_text = f"📦 Контейнеры ({containers_count if containers_count is not None else 0} шт.) ✅"
         containers_callback = "edit_containers"
     else:
         containers_text = "📦 Указать количество контейнеров"
