@@ -614,14 +614,25 @@ async def containers_count_received(message: Message, state: FSMContext, bot: Bo
     try:
         containers_count = int(message.text.strip())
     except ValueError:
+        # Сохраняем состояние для повторного ввода
+        await state.set_state(RouteStates.waiting_for_containers_count)
         await message.answer(
-            f"❌ Введите корректное число от {MIN_CONTAINERS} до {MAX_CONTAINERS}"
+            f"❌ Ошибка: введите число (не текст)\n\n"
+            f"📦 Количество контейнеров должно быть от {MIN_CONTAINERS} до {MAX_CONTAINERS}\n"
+            f"Попробуйте еще раз:"
         )
         return
     
     # Проверяем диапазон
     if containers_count < MIN_CONTAINERS or containers_count > MAX_CONTAINERS:
-        await message.answer(ERROR_MESSAGES['invalid_containers_count'])
+        # Сохраняем состояние для повторного ввода
+        await state.set_state(RouteStates.waiting_for_containers_count)
+        await message.answer(
+            f"❌ Неверный диапазон!\n\n"
+            f"📦 Количество контейнеров должно быть от {MIN_CONTAINERS} до {MAX_CONTAINERS}\n"
+            f"Вы ввели: {containers_count}\n\n"
+            f"Попробуйте еще раз:"
+        )
         return
     
     # Получаем данные состояния
@@ -673,7 +684,14 @@ async def comment_received(message: Message, state: FSMContext, bot: Bot) -> Non
     
     # Проверяем длину комментария
     if len(comment) > 500:
-        await message.answer("❌ Комментарий слишком длинный. Максимальная длина: 500 символов")
+        # Сохраняем состояние для повторного ввода
+        await state.set_state(RouteStates.waiting_for_comment)
+        await message.answer(
+            f"❌ Комментарий слишком длинный!\n\n"
+            f"📝 Максимальная длина: 500 символов\n"
+            f"У вас: {len(comment)} символов\n\n"
+            f"Сократите текст и попробуйте еще раз:"
+        )
         return
     
     # Получаем данные состояния
@@ -1981,6 +1999,8 @@ async def handle_lab_comment(message: Message, state: FSMContext) -> None:
     
     # Проверяем длину комментария
     if len(comment_text) > 500:
+        # Сохраняем состояние для повторного ввода
+        await state.set_state(RouteStates.waiting_for_lab_summary_comment)
         await message.answer(
             f"❌ Комментарий слишком длинный!\n"
             f"Максимум 500 символов, у вас: {len(comment_text)}\n\n"
