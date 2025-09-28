@@ -28,10 +28,11 @@ def get_admin_menu_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📋 Активные доставки")
             ],
             [
-                KeyboardButton(text="📥 Экспорт отчетов"),
-                KeyboardButton(text="⚙️ Настройки")
+                KeyboardButton(text="🏢 Склад Ярославль"),
+                KeyboardButton(text="📥 Экспорт отчетов")
             ],
             [
+                KeyboardButton(text="⚙️ Настройки"),
                 KeyboardButton(text="🏠 Главное меню")
             ]
         ],
@@ -203,6 +204,58 @@ def get_period_selection_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="❌ Отмена",
                     callback_data="period_cancel"
+                )
+            ]
+        ]
+    )
+    return keyboard
+
+
+def get_warehouse_keyboard() -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру для управления складом.
+    
+    Returns:
+        InlineKeyboardMarkup с кнопками управления складом
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📊 Текущее состояние",
+                    callback_data="warehouse_status"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚚 Сформировать маршрут в Москву",
+                    callback_data="warehouse_create_moscow_route"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📈 За сегодня",
+                    callback_data="warehouse_today"
+                ),
+                InlineKeyboardButton(
+                    text="📈 За неделю",
+                    callback_data="warehouse_week"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📈 За месяц",
+                    callback_data="warehouse_month"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить",
+                    callback_data="warehouse_refresh"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Закрыть",
+                    callback_data="warehouse_close"
                 )
             ]
         ]

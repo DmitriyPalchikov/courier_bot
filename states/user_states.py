@@ -63,6 +63,10 @@ class RouteStates(StatesGroup):
     
     # Управление итоговыми данными лаборатории (фото + комментарий)
     managing_lab_summary = State()
+    
+    # НОВЫЕ СОСТОЯНИЯ ДЛЯ МАРШРУТОВ В МОСКВУ
+    # Ожидание итогового комментария для маршрута в Москву
+    waiting_for_moscow_final_comment = State()
 
 
 class DeliveryStates(StatesGroup):

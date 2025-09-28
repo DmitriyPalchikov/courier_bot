@@ -20,12 +20,14 @@ from aiogram.exceptions import TelegramBadRequest
 
 from database.database import get_session
 from database.models import User, Route, RouteProgress, Delivery
+from sqlalchemy import select
 from keyboards.admin_keyboards import (
     get_admin_menu_keyboard,
     get_statistics_keyboard,
     get_export_keyboard,
     get_settings_keyboard,
-    get_period_selection_keyboard
+    get_period_selection_keyboard,
+    get_warehouse_keyboard
 )
 from utils.statistics import (
     get_route_statistics,
@@ -34,6 +36,7 @@ from utils.statistics import (
     format_statistics_message
 )
 from utils.report_generator import generate_excel_report, generate_pdf_report
+from utils.warehouse_manager import WarehouseManager
 from config import ADMIN_IDS
 
 # Создаём роутер для админских хендлеров
@@ -429,6 +432,109 @@ async def show_active_deliveries(message: Message) -> None:
             message_text,
             reply_markup=get_admin_menu_keyboard()
         )
+
+
+@admin_router.message(F.text == "🏢 Склад Ярославль")
+async def show_warehouse_menu(message: Message) -> None:
+    """Показывает меню склада в Ярославле."""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+    
+    await message.answer(
+        "🏢 <b>Склад Ярославль</b>\n\n"
+        "Выберите информацию для просмотра:",
+        reply_markup=get_warehouse_keyboard()
+    )
+
+
+@admin_router.callback_query(F.data.startswith("warehouse_"))
+async def process_warehouse_callback(callback: CallbackQuery) -> None:
+    """Обрабатывает нажатия кнопок в меню склада."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    # Получаем полное действие (все части после первого "_")
+    parts = callback.data.split("_")
+    if len(parts) >= 2:
+        action = "_".join(parts[1:])  # Объединяем все части после "warehouse"
+    else:
+        action = callback.data
+    
+    try:
+        if action == "status" or action == "refresh":
+            # Показываем текущее состояние склада
+            warehouse_stats = await WarehouseManager.get_warehouse_status()
+            message = WarehouseManager.format_warehouse_status_message(warehouse_stats)
+            
+            await callback.message.edit_text(
+                message,
+                reply_markup=get_warehouse_keyboard()
+            )
+            
+        elif action in ["today", "week", "month"]:
+            # Показываем динамику за период
+            days = {
+                "today": 1,
+                "week": 7,
+                "month": 30
+            }[action]
+            
+            # Получаем данные о поступлениях и отправках
+            incoming_data = await WarehouseManager.get_incoming_containers_by_period(days)
+            outgoing_data = await WarehouseManager.get_outgoing_deliveries_by_period(days)
+            
+            # Форматируем сообщение
+            message = WarehouseManager.format_period_summary_message(incoming_data, outgoing_data)
+            
+            await callback.message.edit_text(
+                message,
+                reply_markup=get_warehouse_keyboard()
+            )
+            
+        elif action == "create_moscow_route":
+            # Создаем маршрут в Москву
+            try:
+                route_info = await WarehouseManager.create_moscow_route(callback.from_user.id)
+                
+                if route_info['success']:
+                    # Очищаем склад после создания маршрута
+                    await WarehouseManager.clear_warehouse_after_route_creation()
+                
+                # Форматируем и отправляем сообщение
+                message = WarehouseManager.format_moscow_route_creation_message(route_info)
+                
+                await callback.message.edit_text(
+                    message,
+                    reply_markup=get_warehouse_keyboard()
+                )
+                
+            except Exception as e:
+                logger.error(f"Ошибка при создании маршрута в Москву: {e}")
+                await callback.answer(
+                    "❌ Произошла ошибка при создании маршрута",
+                    show_alert=True
+                )
+                return
+        
+        elif action == "close":
+            # Удаляем сообщение со складом
+            await callback.message.delete()
+            
+        else:
+            await callback.answer("❌ Неизвестное действие", show_alert=True)
+            return
+            
+    except Exception as e:
+        logger.error(f"Ошибка при обработке склада: {e}")
+        await callback.answer(
+            "❌ Произошла ошибка при получении данных склада",
+            show_alert=True
+        )
+        return
+    
+    await callback.answer()
 
 
 @admin_router.message(F.text == "🏠 Главное меню")

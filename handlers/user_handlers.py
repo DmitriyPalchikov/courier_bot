@@ -26,7 +26,7 @@ from utils.progress_bar import format_route_progress, format_route_summary
 
 # Импорты наших модулей
 from database.database import get_session
-from database.models import User, Route, RouteProgress, Delivery, RoutePhoto, LabSummary, LabSummaryPhoto
+from database.models import User, Route, RouteProgress, Delivery, RoutePhoto, LabSummary, LabSummaryPhoto, MoscowRoute
 from utils.callback_manager import (
     parse_callback,
     create_lab_data_callback, create_specific_lab_callback, create_lab_photo_callback,
@@ -51,7 +51,8 @@ from keyboards.user_keyboards import (
     get_lab_comment_confirmation_keyboard,
     get_route_lab_data_keyboard,
     get_lab_data_viewer_keyboard,
-    get_point_action_keyboard
+    get_point_action_keyboard,
+    get_moscow_final_comment_keyboard
 )
 from config import (
     WELCOME_MESSAGE,
@@ -235,9 +236,13 @@ async def select_route(message: Message, state: FSMContext) -> None:
     # Устанавливаем состояние ожидания выбора города
     await state.set_state(RouteStates.waiting_for_city_selection)
     
+    # Используем асинхронную функцию для получения городов
+    from keyboards.user_keyboards import get_cities_keyboard_async
+    cities_keyboard = await get_cities_keyboard_async()
+    
     await message.answer(
         "🏙️ Выберите город для маршрута:",
-        reply_markup=get_cities_keyboard()
+        reply_markup=cities_keyboard
     )
 
 
@@ -254,13 +259,25 @@ async def city_selected(callback: CallbackQuery, state: FSMContext) -> None:
         raw_data = raw_data[0]
     city_name = str(raw_data).split(":", 1)[1]
     
-    # Проверяем, что город существует в конфигурации
-    if city_name not in AVAILABLE_ROUTES:
+    # Получаем все доступные маршруты (включая динамические в Москву)
+    from utils.route_selector import RouteSelector
+    all_routes = await RouteSelector.get_all_available_routes()
+    
+    # Проверяем, что город существует
+    if city_name not in all_routes:
         await callback.answer("❌ Неизвестный город", show_alert=True)
         return
     
     # Получаем точки маршрута для выбранного города
-    route_points = AVAILABLE_ROUTES[city_name]
+    route_points = all_routes[city_name]
+    
+    # Получаем информацию о типе маршрута
+    route_info_data = await RouteSelector.get_route_info(city_name, route_points)
+    
+    # Для маршрутов в Москву получаем moscow_route_id
+    moscow_route_id = None
+    if route_info_data['action_type'] == 'delivery' and route_points:
+        moscow_route_id = route_points[0].get('moscow_route_id')
     
     # Сохраняем выбранный город и маршрут
     await state.update_data(
@@ -268,19 +285,38 @@ async def city_selected(callback: CallbackQuery, state: FSMContext) -> None:
         route_points=route_points,
         current_point_index=0,
         collected_containers={},
-        completed_points=0  # Добавляем счетчик завершенных точек
+        completed_points=0,  # Добавляем счетчик завершенных точек
+        route_type=route_info_data['action_type'],  # Тип маршрута: collection или delivery
+        moscow_route_id=moscow_route_id  # ID маршрута в Москву (если применимо)
     )
     
     # Переводим в состояние ожидания подтверждения
     await state.set_state(RouteStates.waiting_for_route_confirmation)
     
     # Формируем информацию о маршруте
-    route_info = f"📍 <b>Выбранный маршрут: {city_name}</b>\n\n"
-    route_info += f"📋 <b>Точки для посещения ({len(route_points)}):</b>\n"
-    
-    for i, point in enumerate(route_points, 1):
-        route_info += f"{i}. <b>{point['organization']}</b> - {point['name']}\n"
-        route_info += f"   📍 {point['address']}\n\n"
+    if route_info_data['action_type'] == 'delivery':
+        # Маршрут доставки в Москву
+        route_info = f"🚚 <b>Маршрут доставки: {route_info_data['route_name']}</b>\n\n"
+        route_info += f"📦 <b>Контейнеров к доставке:</b> {route_info_data['total_containers']}\n"
+        route_info += f"📋 <b>Точек доставки ({len(route_points)}):</b>\n\n"
+        
+        for i, point in enumerate(route_points, 1):
+            containers = point.get('containers_to_deliver', 0)
+            route_info += f"{i}. <b>{point['organization']}</b>\n"
+            route_info += f"   📦 Доставить: {containers} контейнеров\n"
+            route_info += f"   📍 {point['address']}\n\n"
+        
+        route_info += "🔄 <b>Тип маршрута:</b> Доставка (отдача контейнеров)\n\n"
+    else:
+        # Маршрут сбора
+        route_info = f"📦 <b>Выбранный маршрут: {city_name}</b>\n\n"
+        route_info += f"📋 <b>Точки для посещения ({len(route_points)}):</b>\n\n"
+        
+        for i, point in enumerate(route_points, 1):
+            route_info += f"{i}. <b>{point['organization']}</b> - {point['name']}\n"
+            route_info += f"   📍 {point['address']}\n\n"
+        
+        route_info += "🔄 <b>Тип маршрута:</b> Сбор (получение контейнеров)\n\n"
     
     route_info += "❓ <b>Подтвердите выбор маршрута:</b>"
     
@@ -565,18 +601,33 @@ async def proceed_to_boxes(callback: CallbackQuery, state: FSMContext) -> None:
     """
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
+    route_type = state_data.get('route_type', 'collection')
     
     # Переводим в состояние ожидания количества контейнеров
     await state.set_state(RouteStates.waiting_for_containers_count)
     
-    await callback.message.edit_text(
-        f"📦 Фотографии сохранены!\n\n"
-        f"📍 Точка: <b>{current_point['name']}</b>\n"
-        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
-        f"Укажите количество собранных контейнеров\n"
-        f"Введите число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
-    )
+    # Формируем сообщение в зависимости от типа маршрута
+    if route_type == 'delivery':
+        containers_to_deliver = current_point.get('containers_to_deliver', 0)
+        point_name = current_point.get('point_name', current_point.get('name', 'Неизвестная точка'))
+        message_text = (
+            f"📦 Фотографии сохранены!\n\n"
+            f"📍 Точка доставки: <b>{point_name}</b>\n"
+            f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+            f"🚚 <b>У вас с собой:</b> {containers_to_deliver} контейнеров\n\n"
+            f"Укажите количество контейнеров, которые необходимо отгрузить:\n"
+            f"Введите число от {MIN_CONTAINERS} до {containers_to_deliver}:"
+        )
+    else:
+        message_text = (
+            f"📦 Фотографии сохранены!\n\n"
+            f"📍 Точка: <b>{current_point['name']}</b>\n"
+            f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+            f"Укажите количество собранных контейнеров\n"
+            f"Введите число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
+        )
     
+    await callback.message.edit_text(message_text)
     await callback.answer()
 
 
@@ -702,6 +753,20 @@ async def containers_count_received(message: Message, state: FSMContext, bot: Bo
     current_point_index = state_data.get('current_point_index', 0)
     total_points = state_data.get('total_points', 0)
     collected_containers = state_data.get('collected_containers', {})
+    route_type = state_data.get('route_type', 'collection')  # collection или delivery
+    
+    # Для маршрутов доставки проверяем, что не превышаем количество контейнеров с собой
+    if route_type == 'delivery':
+        containers_to_deliver = current_point.get('containers_to_deliver', 0)
+        if containers_count > containers_to_deliver:
+            await state.set_state(RouteStates.waiting_for_containers_count)
+            await message.answer(
+                f"❌ Ошибка: у вас с собой только {containers_to_deliver} контейнеров для {current_point['organization']}\n\n"
+                f"Вы можете отдать максимум {containers_to_deliver} контейнеров\n"
+                f"Вы ввели: {containers_count}\n\n"
+                f"Попробуйте еще раз:"
+            )
+            return
     
     # Сохраняем количество контейнеров в состоянии и возвращаемся к управлению данными
     await state.update_data(containers_count=containers_count)
@@ -714,8 +779,14 @@ async def containers_count_received(message: Message, state: FSMContext, bot: Bo
     
     status_text = _get_point_status_text(state_data, current_point)
     
+    # Формируем сообщение в зависимости от типа маршрута
+    if route_type == 'delivery':
+        success_message = f"✅ Количество отданных контейнеров: {containers_count}\n\n"
+    else:
+        success_message = f"✅ Количество собранных контейнеров: {containers_count}\n\n"
+    
     await message.answer(
-        f"✅ Количество контейнеров сохранено: {containers_count}\n\n" + status_text,
+        success_message + status_text,
         reply_markup=get_point_data_management_keyboard(
             has_photos=len(photos_list) > 0,
             has_containers=True,
@@ -792,16 +863,34 @@ def _get_point_status_text(state_data: dict, current_point: dict) -> str:
     photos_list = state_data.get('photos_list', [])
     containers_count = state_data.get('containers_count', None)
     comment = state_data.get('comment', '')
+    route_type = state_data.get('route_type', 'collection')
     
-    status_text = f"📍 Точка: <b>{current_point['name']}</b>\n"
-    status_text += f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+    # Название точки зависит от типа маршрута
+    if route_type == 'delivery':
+        point_name = current_point.get('point_name', current_point.get('name', 'Неизвестная точка'))
+        containers_to_deliver = current_point.get('containers_to_deliver', 0)
+        status_text = f"📍 Точка доставки: <b>{point_name}</b>\n"
+        status_text += f"🏢 Организация: <b>{current_point['organization']}</b>\n"
+        status_text += f"📦 К доставке: {containers_to_deliver} контейнеров\n\n"
+    else:
+        status_text = f"📍 Точка сбора: <b>{current_point['name']}</b>\n"
+        status_text += f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+    
     status_text += "📊 Статус заполнения:\n"
     status_text += f"📸 Фото: {'✅' if photos_list else '❌'} ({len(photos_list)} шт.)\n"
-    status_text += f"📦 Контейнеры: {'✅' if containers_count is not None else '❌'} ({containers_count if containers_count is not None else '—'} шт.)\n"
+    
+    if route_type == 'delivery':
+        status_text += f"📦 Отдано: {'✅' if containers_count is not None else '❌'} ({containers_count if containers_count is not None else '—'} шт.)\n"
+    else:
+        status_text += f"📦 Собрано: {'✅' if containers_count is not None else '❌'} ({containers_count if containers_count is not None else '—'} шт.)\n"
+    
     status_text += f"📝 Комментарий: {'✅' if comment else '❌'}\n\n"
     
     if photos_list and containers_count is not None and comment:
-        status_text += "🚀 Все данные заполнены! Можете продолжить маршрут."
+        if route_type == 'delivery':
+            status_text += "🚀 Все данные заполнены! Можете продолжить доставку."
+        else:
+            status_text += "🚀 Все данные заполнены! Можете продолжить маршрут."
     else:
         status_text += "⚠️ Заполните все необходимые данные для продолжения."
     
@@ -861,14 +950,28 @@ async def add_containers_from_management(callback: CallbackQuery, state: FSMCont
     
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
+    route_type = state_data.get('route_type', 'collection')
     
-    await callback.message.edit_text(
-        f"📦 Укажите количество собранных контейнеров\n\n"
-        f"📍 Точка: <b>{current_point['name']}</b>\n"
-        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
-        f"Введите число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
-    )
+    # Формируем сообщение в зависимости от типа маршрута
+    if route_type == 'delivery':
+        containers_to_deliver = current_point.get('containers_to_deliver', 0)
+        point_name = current_point.get('point_name', current_point.get('name', 'Неизвестная точка'))
+        message_text = (
+            f"📦 Укажите количество контейнеров для отгрузки\n\n"
+            f"📍 Точка доставки: <b>{point_name}</b>\n"
+            f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+            f"🚚 <b>У вас с собой:</b> {containers_to_deliver} контейнеров\n\n"
+            f"Введите число от {MIN_CONTAINERS} до {containers_to_deliver}:"
+        )
+    else:
+        message_text = (
+            f"📦 Укажите количество собранных контейнеров\n\n"
+            f"📍 Точка: <b>{current_point['name']}</b>\n"
+            f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+            f"Введите число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
+        )
     
+    await callback.message.edit_text(message_text)
     await callback.answer()
 
 
@@ -882,15 +985,30 @@ async def edit_containers_from_management(callback: CallbackQuery, state: FSMCon
     state_data = await state.get_data()
     current_point = state_data.get('current_point')
     current_containers = state_data.get('containers_count', None)
+    route_type = state_data.get('route_type', 'collection')
     
-    await callback.message.edit_text(
-        f"📦 Изменение количества контейнеров\n\n"
-        f"📍 Точка: <b>{current_point['name']}</b>\n"
-        f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
-        f"Текущее количество: {current_containers if current_containers is not None else 'не указано'}\n"
-        f"Введите новое число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
-    )
+    # Формируем сообщение в зависимости от типа маршрута
+    if route_type == 'delivery':
+        containers_to_deliver = current_point.get('containers_to_deliver', 0)
+        point_name = current_point.get('point_name', current_point.get('name', 'Неизвестная точка'))
+        message_text = (
+            f"📦 Изменение количества контейнеров для отгрузки\n\n"
+            f"📍 Точка доставки: <b>{point_name}</b>\n"
+            f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+            f"🚚 <b>У вас с собой:</b> {containers_to_deliver} контейнеров\n"
+            f"Текущее количество отгружено: {current_containers if current_containers is not None else 'не указано'}\n\n"
+            f"Введите новое число от {MIN_CONTAINERS} до {containers_to_deliver}:"
+        )
+    else:
+        message_text = (
+            f"📦 Изменение количества контейнеров\n\n"
+            f"📍 Точка: <b>{current_point['name']}</b>\n"
+            f"🏢 Организация: <b>{current_point['organization']}</b>\n\n"
+            f"Текущее количество: {current_containers if current_containers is not None else 'не указано'}\n"
+            f"Введите новое число от {MIN_CONTAINERS} до {MAX_CONTAINERS}:"
+        )
     
+    await callback.message.edit_text(message_text)
     await callback.answer()
 
 
@@ -1028,9 +1146,15 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
     next_point_index = current_point_index + 1
     
     if next_point_index < total_points:
-        # Переходим к следующей точке
-        route_points = AVAILABLE_ROUTES[selected_city]
-        next_point = route_points[next_point_index]
+        # Переходим к следующей точке  
+        # Используем route_points из состояния, а не AVAILABLE_ROUTES
+        route_points = state_data.get('route_points', [])
+        if next_point_index < len(route_points):
+            next_point = route_points[next_point_index]
+        else:
+            logger.error(f"next_point_index {next_point_index} превышает количество точек {len(route_points)}")
+            await callback.message.answer("❌ Ошибка: неверный индекс точки маршрута")
+            return
         
         await state.update_data(
             current_point=next_point,
@@ -1062,21 +1186,39 @@ async def continue_route_from_management(callback: CallbackQuery, state: FSMCont
         # Все точки пройдены, переходим к завершению маршрута
         await state.set_state(RouteStates.waiting_for_route_completion)
         
-        # Формируем сводку по маршруту
-        summary = f"🎉 <b>Все точки маршрута пройдены!</b>\n\n"
-        summary += f"✅ <b>Завершено: {completed_points} из {total_points} точек</b>\n"
-        summary += f"📊 <b>Сводка по сбору:</b>\n"
+        # Получаем тип маршрута
+        route_type = state_data.get('route_type', 'collection')
         
-        total_collected = 0
-        for organization, count in collected_containers.items():
-            summary += f"• {organization}: {count} контейнеров\n"
-            total_collected += count
-        
-        summary += f"\n📦 <b>Всего собрано:</b> {total_collected} контейнеров"
+        # Формируем сводку по маршруту в зависимости от типа
+        if route_type == 'delivery':
+            # Для маршрутов доставки в Москву
+            summary = f"🎉 <b>Все точки доставки пройдены!</b>\n\n"
+            summary += f"✅ <b>Завершено: {completed_points} из {total_points} точек</b>\n"
+            summary += f"📊 <b>Сводка по доставке:</b>\n"
+            
+            total_delivered = 0
+            for organization, count in collected_containers.items():
+                summary += f"• {organization}: {count} контейнеров\n"
+                total_delivered += count
+            
+            summary += f"\n📦 <b>Всего доставлено:</b> {total_delivered} контейнеров\n\n"
+            summary += f"📝 <b>Для завершения маршрута необходимо добавить итоговый комментарий</b>"
+        else:
+            # Для маршрутов сбора
+            summary = f"🎉 <b>Все точки маршрута пройдены!</b>\n\n"
+            summary += f"✅ <b>Завершено: {completed_points} из {total_points} точек</b>\n"
+            summary += f"📊 <b>Сводка по сбору:</b>\n"
+            
+            total_collected = 0
+            for organization, count in collected_containers.items():
+                summary += f"• {organization}: {count} контейнеров\n"
+                total_collected += count
+            
+            summary += f"\n📦 <b>Всего собрано:</b> {total_collected} контейнеров"
         
         await callback.message.answer(
             text=summary,
-            reply_markup=get_complete_route_keyboard()
+            reply_markup=get_complete_route_keyboard(route_type)
         )
     
     await callback.answer()
@@ -1224,6 +1366,176 @@ async def show_lab_selection(callback: CallbackQuery, state: FSMContext) -> None
         )
     
     await callback.answer()
+
+
+# ==============================================
+# ОБРАБОТЧИКИ ДЛЯ МАРШРУТОВ В МОСКВУ
+# ==============================================
+
+@user_router.callback_query(F.data == "add_final_comment_moscow", RouteStates.waiting_for_route_completion)
+async def add_final_comment_moscow(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Обработчик кнопки добавления итогового комментария для маршрута в Москву.
+    """
+    await state.set_state(RouteStates.waiting_for_moscow_final_comment)
+    
+    state_data = await state.get_data()
+    collected_containers = state_data.get('collected_containers', {})
+    
+    # Формируем сводку для отображения
+    summary_text = "📝 <b>Добавление итогового комментария</b>\n\n"
+    summary_text += "📊 <b>Сводка по доставке:</b>\n"
+    
+    total_delivered = 0
+    for organization, count in collected_containers.items():
+        summary_text += f"• {organization}: {count} контейнеров\n"
+        total_delivered += count
+    
+    summary_text += f"\n📦 <b>Всего доставлено:</b> {total_delivered} контейнеров\n\n"
+    summary_text += "💬 <b>Напишите итоговый комментарий по завершению маршрута:</b>\n"
+    summary_text += "(обязательное поле, максимум 500 символов)"
+    
+    await callback.message.edit_text(summary_text)
+    await callback.answer()
+
+
+@user_router.message(F.text, RouteStates.waiting_for_moscow_final_comment)
+async def moscow_final_comment_received(message: Message, state: FSMContext) -> None:
+    """
+    Обработчик получения итогового комментария для маршрута в Москву.
+    """
+    final_comment = message.text.strip()
+    
+    # Проверяем длину комментария
+    if len(final_comment) > 500:
+        await message.answer(
+            "❌ Комментарий слишком длинный!\n\n"
+            "Максимальная длина: 500 символов\n"
+            f"Ваш комментарий: {len(final_comment)} символов\n\n"
+            "Попробуйте сократить текст:"
+        )
+        return
+    
+    if not final_comment:
+        await message.answer(
+            "❌ Комментарий не может быть пустым!\n\n"
+            "Напишите итоговый комментарий по завершению маршрута:"
+        )
+        return
+    
+    # Сохраняем комментарий в состоянии
+    await state.update_data(moscow_final_comment=final_comment)
+    
+    state_data = await state.get_data()
+    collected_containers = state_data.get('collected_containers', {})
+    
+    # Показываем подтверждение
+    confirmation_text = "✅ <b>Итоговый комментарий добавлен!</b>\n\n"
+    confirmation_text += f"💬 <b>Комментарий:</b> {final_comment}\n\n"
+    
+    confirmation_text += "📊 <b>Сводка по доставке:</b>\n"
+    total_delivered = 0
+    for organization, count in collected_containers.items():
+        confirmation_text += f"• {organization}: {count} контейнеров\n"
+        total_delivered += count
+    
+    confirmation_text += f"\n📦 <b>Всего доставлено:</b> {total_delivered} контейнеров\n\n"
+    confirmation_text += "🎯 <b>Нажмите кнопку ниже для завершения маршрута</b>"
+    
+    await message.answer(
+        confirmation_text,
+        reply_markup=get_moscow_final_comment_keyboard()
+    )
+
+
+@user_router.callback_query(F.data == "complete_moscow_route_final", RouteStates.waiting_for_moscow_final_comment)
+async def complete_moscow_route_final(callback: CallbackQuery, state: FSMContext) -> None:
+    """
+    Финальное завершение маршрута в Москву с итоговым комментарием.
+    """
+    state_data = await state.get_data()
+    moscow_final_comment = state_data.get('moscow_final_comment', '')
+    collected_containers = state_data.get('collected_containers', {})
+    moscow_route_id = state_data.get('moscow_route_id')
+    
+    if not moscow_final_comment:
+        await callback.answer("❌ Итоговый комментарий не найден!", show_alert=True)
+        return
+    
+    # Сохраняем итоговый комментарий и обновляем статус маршрута в Москву
+    route_session_id = state_data.get('route_session_id')
+    
+    async for session in get_session():
+        # Создаём специальную запись с итоговым комментарием
+        final_comment_progress = RouteProgress(
+            user_id=callback.from_user.id,
+            route_id=1,  # Фиктивный ID для итогового комментария
+            route_session_id=route_session_id,
+            containers_count=0,  # Не относится к конкретной точке
+            notes=f"ИТОГОВЫЙ_КОММЕНТАРИЙ_МОСКВА: {moscow_final_comment}",
+            status='completed'
+        )
+        session.add(final_comment_progress)
+        
+        # Обновляем статус маршрута в Москву на 'completed'
+        if moscow_route_id:
+            moscow_route = await session.get(MoscowRoute, moscow_route_id)
+            if moscow_route:
+                moscow_route.status = 'completed'
+                moscow_route.courier_id = callback.from_user.id
+                moscow_route.completed_at = datetime.now()
+                logger.info(f"Маршрут в Москву {moscow_route_id} помечен как завершенный пользователем {callback.from_user.id}")
+                
+                # Обновляем статус всех доставок с 'in_progress' на 'completed'
+                in_progress_deliveries = await session.scalars(
+                    select(Delivery).where(Delivery.status == 'in_progress')
+                )
+                in_progress_list = in_progress_deliveries.all()
+                
+                completed_count = 0
+                for delivery in in_progress_list:
+                    delivery.status = 'completed'
+                    delivery.delivered_at = datetime.now()
+                    completed_count += 1
+                
+                logger.info(f"Все доставки in_progress помечены как completed: {completed_count} шт.")
+                
+            else:
+                logger.warning(f"Маршрут в Москву с ID {moscow_route_id} не найден")
+        else:
+            logger.warning("moscow_route_id не найден в состоянии пользователя")
+        
+        await session.commit()
+    
+    # Очищаем состояние
+    await state.clear()
+    
+    # Формируем финальное сообщение
+    completion_message = "🎉 <b>Маршрут в Москву успешно завершен!</b>\n\n"
+    completion_message += "📊 <b>Итоговая сводка:</b>\n"
+    
+    total_delivered = 0
+    for organization, count in collected_containers.items():
+        completion_message += f"• {organization}: {count} контейнеров\n"
+        total_delivered += count
+    
+    completion_message += f"\n📦 <b>Всего доставлено:</b> {total_delivered} контейнеров\n"
+    completion_message += f"💬 <b>Итоговый комментарий:</b> {moscow_final_comment}\n\n"
+    completion_message += "✅ Все данные сохранены в системе\n"
+    completion_message += "🏠 Возвращайтесь в главное меню для выбора нового маршрута"
+    
+    await callback.message.edit_text(
+        completion_message,
+        reply_markup=None
+    )
+    
+    # Отправляем главное меню
+    await callback.message.answer(
+        "🏠 Главное меню:",
+        reply_markup=get_main_menu_keyboard()
+    )
+    
+    await callback.answer("🎉 Маршрут завершен!")
 
 
 async def get_user_routes_with_pagination(user_id: int, limit: int = 10, offset: int = 0):
@@ -1832,9 +2144,11 @@ async def complete_route_final(callback: CallbackQuery, state: FSMContext) -> No
     time_str = f"{hours}ч {minutes}мин"
     
     # Формируем сообщение с итогами
+    # Используем количество точек из состояния, а не AVAILABLE_ROUTES
+    route_points = state_data.get('route_points', [])
     completion_message = format_route_summary(
         city=selected_city,
-        total_points=len(AVAILABLE_ROUTES[selected_city]),
+        total_points=len(route_points),
         collected_containers=collected_containers,
         total_time=time_str
     )
@@ -2333,14 +2647,29 @@ async def skip_point(callback: CallbackQuery, state: FSMContext) -> None:
         # Все точки пройдены, переходим к завершению маршрута
         await state.set_state(RouteStates.waiting_for_route_completion)
         
-        await callback.message.edit_text(
-            text=f"🏁 <b>Маршрут завершен!</b>\n\n"
-                 f"📍 Последняя точка пропущена\n"
-                 f"📅 Время завершения: {datetime.now().strftime('%H:%M')}\n\n"
-                 f"Для полного завершения нужно заполнить \n"
-                 f"итоговые данные по лабораториям.",
-            reply_markup=get_complete_route_keyboard()
-        )
+        # Получаем тип маршрута
+        route_type = state_data.get('route_type', 'collection')
+        
+        if route_type == 'delivery':
+            # Для маршрутов доставки в Москву
+            await callback.message.edit_text(
+                text=f"🏁 <b>Маршрут доставки завершен!</b>\n\n"
+                     f"📍 Последняя точка пропущена\n"
+                     f"📅 Время завершения: {datetime.now().strftime('%H:%M')}\n\n"
+                     f"📝 Для полного завершения необходимо добавить итоговый комментарий.",
+                reply_markup=get_complete_route_keyboard(route_type)
+            )
+        else:
+            # Для маршрутов сбора
+            await callback.message.edit_text(
+                text=f"🏁 <b>Маршрут завершен!</b>\n\n"
+                     f"📍 Последняя точка пропущена\n"
+                     f"📅 Время завершения: {datetime.now().strftime('%H:%M')}\n\n"
+                     f"Для полного завершения нужно заполнить \n"
+                     f"итоговые данные по лабораториям.",
+                reply_markup=get_complete_route_keyboard(route_type)
+            )
+        
         await callback.answer("🏁 Маршрут завершен!")
 
 
@@ -2702,6 +3031,8 @@ async def unknown_message(message: Message, state: FSMContext) -> None:
         await message.answer("📝 Напишите короткий комментарий к этой точке маршрута (максимум 500 символов)")
     elif current_state == RouteStates.managing_point_data:
         await message.answer("🔄 Используйте кнопки выше для управления данными точки")
+    elif current_state == RouteStates.waiting_for_moscow_final_comment:
+        await message.answer("💬 Напишите итоговый комментарий по завершению маршрута в Москву (обязательное поле, максимум 500 символов)")
     else:
         await message.answer(
             "🤔 Я не понимаю это сообщение. Используйте кнопки меню или команды.",
