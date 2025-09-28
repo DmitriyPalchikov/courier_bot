@@ -450,6 +450,245 @@ class LabSummaryPhoto(Base):
         return f"<LabSummaryPhoto(id={self.id}, lab_summary_id={self.lab_summary_id}, order={self.photo_order})>"
 
 
+class MoscowRoute(Base):
+    """
+    Модель маршрута в Москву.
+    
+    Содержит информацию о сформированных маршрутах доставки
+    контейнеров из склада Ярославля в Москву.
+    """
+    __tablename__ = 'moscow_routes'
+    
+    # Уникальный идентификатор маршрута
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        comment="Уникальный ID маршрута в Москву"
+    )
+    
+    # Название маршрута (например "Доставка в Москву 2025-09-20")
+    route_name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="Название маршрута"
+    )
+    
+    # Статус маршрута
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default='available',
+        comment="Статус: available, in_progress, completed"
+    )
+    
+    # Кто создал маршрут
+    created_by_admin: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey('users.telegram_id'),
+        nullable=False,
+        comment="ID администратора, создавшего маршрут"
+    )
+    
+    # Кто выполняет маршрут
+    courier_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        ForeignKey('users.telegram_id'),
+        nullable=True,
+        comment="ID курьера, выполняющего маршрут"
+    )
+    
+    # Время начала выполнения
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+        comment="Время начала выполнения маршрута"
+    )
+    
+    # Время завершения
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+        comment="Время завершения маршрута"
+    )
+    
+    # Связь с точками маршрута
+    route_points: Mapped[list["MoscowRoutePoint"]] = relationship(
+        "MoscowRoutePoint",
+        back_populates="moscow_route",
+        cascade="all, delete-orphan",
+        order_by="MoscowRoutePoint.order_index"
+    )
+    
+    def __repr__(self) -> str:
+        return f"<MoscowRoute(id={self.id}, name='{self.route_name}', status='{self.status}')>"
+
+
+class MoscowRoutePoint(Base):
+    """
+    Модель точки маршрута в Москву.
+    
+    Содержит информацию о конкретной точке доставки в Москве
+    с количеством контейнеров для каждой организации.
+    """
+    __tablename__ = 'moscow_route_points'
+    
+    # Уникальный идентификатор точки
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        comment="Уникальный ID точки маршрута"
+    )
+    
+    # Связь с маршрутом
+    moscow_route_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey('moscow_routes.id', ondelete='CASCADE'),
+        nullable=False,
+        comment="ID маршрута в Москву"
+    )
+    
+    # Организация (КДЛ, Ховер, Дартис)
+    organization: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        comment="Название организации"
+    )
+    
+    # Название точки
+    point_name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="Название точки доставки"
+    )
+    
+    # Адрес доставки в Москве
+    address: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="Адрес доставки в Москве"
+    )
+    
+    # Контактная информация
+    contact_info: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Контактная информация"
+    )
+    
+    # Количество контейнеров для доставки
+    containers_to_deliver: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Количество контейнеров для доставки"
+    )
+    
+    # Количество фактически доставленных контейнеров
+    containers_delivered: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        comment="Количество фактически доставленных контейнеров"
+    )
+    
+    # Порядок посещения
+    order_index: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        comment="Порядок посещения точки"
+    )
+    
+    # Статус точки
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default='pending',
+        comment="Статус: pending, completed, skipped"
+    )
+    
+    # Время посещения
+    visited_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+        comment="Время посещения точки"
+    )
+    
+    # Комментарий курьера
+    comment: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Комментарий курьера"
+    )
+    
+    # Связи
+    moscow_route: Mapped["MoscowRoute"] = relationship(
+        "MoscowRoute",
+        back_populates="route_points"
+    )
+    
+    # Фотографии (если нужны)
+    photos: Mapped[list["MoscowRoutePhoto"]] = relationship(
+        "MoscowRoutePhoto",
+        back_populates="route_point",
+        cascade="all, delete-orphan",
+        order_by="MoscowRoutePhoto.photo_order"
+    )
+    
+    def __repr__(self) -> str:
+        return f"<MoscowRoutePoint(id={self.id}, org='{self.organization}', containers={self.containers_to_deliver})>"
+
+
+class MoscowRoutePhoto(Base):
+    """
+    Модель фотографий с точек доставки в Москве.
+    """
+    __tablename__ = 'moscow_route_photos'
+    
+    # Уникальный идентификатор фотографии
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        comment="Уникальный ID фотографии"
+    )
+    
+    # Связь с точкой маршрута
+    route_point_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey('moscow_route_points.id', ondelete='CASCADE'),
+        nullable=False,
+        comment="ID точки маршрута"
+    )
+    
+    # ID фотографии в Telegram
+    photo_file_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="File ID фотографии в Telegram"
+    )
+    
+    # Порядковый номер фотографии
+    photo_order: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        comment="Порядковый номер фотографии"
+    )
+    
+    # Описание фотографии
+    description: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Описание фотографии"
+    )
+    
+    # Связь с точкой маршрута
+    route_point: Mapped["MoscowRoutePoint"] = relationship(
+        "MoscowRoutePoint",
+        back_populates="photos"
+    )
+    
+    def __repr__(self) -> str:
+        return f"<MoscowRoutePhoto(id={self.id}, route_point_id={self.route_point_id})>"
+
+
 class Delivery(Base):
     """
     Модель доставки в Москву.

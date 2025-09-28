@@ -19,6 +19,54 @@ from aiogram.types import (
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 from config import AVAILABLE_ROUTES
+
+
+async def get_cities_keyboard_async() -> InlineKeyboardMarkup:
+    """
+    Создаёт async inline клавиатуру для выбора городов маршрута.
+    
+    Динамически генерирует кнопки на основе доступных маршрутов
+    из конфигурации AVAILABLE_ROUTES и маршрутов доставки в Москву.
+    
+    Returns:
+        InlineKeyboardMarkup: Inline клавиатура с городами
+    """
+    from utils.route_selector import RouteSelector
+    
+    builder = InlineKeyboardBuilder()
+    
+    # Получаем все доступные маршруты (включая динамические в Москву)
+    all_routes = await RouteSelector.get_all_available_routes()
+    
+    # Добавляем кнопку для каждого города
+    for city_name, routes in all_routes.items():
+        if routes:  # Только если есть точки в маршруте
+            # Подсчитываем количество точек в маршруте
+            points_count = len(routes)
+            
+            if city_name == "Москва":
+                # Для Москвы показываем количество контейнеров
+                total_containers = sum(route.get('containers_to_deliver', 0) for route in routes)
+                button_text = f"🚚 {city_name} ({total_containers} контейнеров)"
+            else:
+                # Для других городов показываем количество точек
+                button_text = f"📦 {city_name} ({points_count} точек)"
+            
+            builder.add(InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"city:{city_name}"
+            ))
+    
+    # Добавляем кнопку отмены
+    builder.add(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data="cancel_city_selection"
+    ))
+    
+    # Размещаем кнопки по одной в ряду для лучшей читаемости
+    builder.adjust(1)
+    
+    return builder.as_markup()
 from utils.callback_manager import (
     create_route_callback, create_route_point_callback, create_photo_callback,
     create_lab_data_callback, create_specific_lab_callback, create_lab_photo_callback,
@@ -199,22 +247,54 @@ def get_confirmation_keyboard(confirm_text: str = "✅ Да",
     return builder.as_markup()
 
 
-def get_complete_route_keyboard() -> InlineKeyboardMarkup:
+def get_complete_route_keyboard(route_type: str = 'collection') -> InlineKeyboardMarkup:
     """
-    Создаёт клавиатуру для перехода к заполнению итогов по лабораториям.
+    Создаёт клавиатуру для завершения маршрута.
     
-    Показывается после прохождения всех точек маршрута.
-    Теперь вместо завершения сразу переходим к заполнению данных по лабораториям.
+    Для маршрутов сбора показывается кнопка перехода к заполнению данных по лабораториям.
+    Для маршрутов доставки в Москву показывается кнопка для добавления итогового комментария.
+    
+    Args:
+        route_type: Тип маршрута ('collection' или 'delivery')
     
     Returns:
-        InlineKeyboardMarkup: Клавиатура для перехода к лабораториям
+        InlineKeyboardMarkup: Клавиатура для завершения маршрута
+    """
+    builder = InlineKeyboardBuilder()
+    
+    if route_type == 'delivery':
+        # Для маршрутов доставки в Москву - добавить итоговый комментарий
+        builder.add(
+            InlineKeyboardButton(
+                text="📝 Добавить итоговый комментарий",
+                callback_data="add_final_comment_moscow"
+            )
+        )
+    else:
+        # Для маршрутов сбора - заполнить данные по лабораториям
+        builder.add(
+            InlineKeyboardButton(
+                text="📋 Заполнить данные по лабораториям",
+                callback_data="start_lab_summaries"
+            )
+        )
+    
+    return builder.as_markup()
+
+
+def get_moscow_final_comment_keyboard() -> InlineKeyboardMarkup:
+    """
+    Создаёт клавиатуру для подтверждения итогового комментария маршрута в Москву.
+    
+    Returns:
+        InlineKeyboardMarkup: Клавиатура для подтверждения комментария
     """
     builder = InlineKeyboardBuilder()
     
     builder.add(
         InlineKeyboardButton(
-            text="📋 Заполнить данные по лабораториям",
-            callback_data="start_lab_summaries"
+            text="✅ Завершить маршрут",
+            callback_data="complete_moscow_route_final"
         )
     )
     
