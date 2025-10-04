@@ -13,21 +13,27 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, InputMediaPhoto
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 
 from database.database import get_session
 from database.models import User, Route, RouteProgress, Delivery
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from keyboards.admin_keyboards import (
     get_admin_menu_keyboard,
     get_statistics_keyboard,
     get_export_keyboard,
     get_settings_keyboard,
     get_period_selection_keyboard,
-    get_warehouse_keyboard
+    get_warehouse_keyboard,
+    get_routes_monitoring_keyboard,
+    get_route_details_keyboard,
+    get_city_selection_keyboard,
+    get_admin_route_selection_keyboard,
+    get_admin_route_detail_keyboard,
+    get_admin_photos_viewer_keyboard
 )
 from utils.statistics import (
     get_route_statistics,
@@ -37,6 +43,7 @@ from utils.statistics import (
 )
 from utils.report_generator import generate_excel_report, generate_pdf_report
 from utils.warehouse_manager import WarehouseManager
+from utils.route_monitor import RouteMonitor
 from config import ADMIN_IDS
 
 # Создаём роутер для админских хендлеров
@@ -147,6 +154,17 @@ async def process_statistics_callback(callback: CallbackQuery) -> None:
                 reply_markup=get_statistics_keyboard()
             )
             
+        elif action == "routes":
+            # Обработка callback_data "stats_routes_monitoring"
+            if callback.data == "stats_routes_monitoring":
+                logger.info(f"🛣️ МОНИТОРИНГ МАРШРУТОВ: Вызван пользователем {callback.from_user.id}")
+                await callback.message.edit_text(
+                    "🛣️ <b>МОНИТОРИНГ МАРШРУТОВ</b>\n\n"
+                    "Выберите тип маршрутов для просмотра:",
+                    reply_markup=get_routes_monitoring_keyboard()
+                )
+                return
+        
         elif action == "refresh":
             # Просто повторно показываем общую статистику
             stats = await get_route_statistics(session)
@@ -550,3 +568,770 @@ async def return_to_main_menu(message: Message) -> None:
         "🏠 Вы вернулись в главное меню",
         reply_markup=get_main_menu_keyboard()
     )
+
+
+# ================================
+# ОБРАБОТЧИКИ МОНИТОРИНГА МАРШРУТОВ
+# ================================
+
+
+@admin_router.callback_query(F.data == "routes_active")
+async def show_active_routes(callback: CallbackQuery) -> None:
+    """Показывает активные маршруты в виде списка для выбора."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    await callback.answer("🔄 Загружаю активные маршруты...")
+    
+    active_routes = await RouteMonitor.get_active_route_sessions()
+    
+    if not active_routes:
+        await callback.message.edit_text(
+            "🏃‍♂️ АКТИВНЫЕ МАРШРУТЫ\n\n"
+            "❌ Активных маршрутов не найдено.",
+            reply_markup=get_routes_monitoring_keyboard()
+        )
+        return
+    
+    message_text = f"🏃‍♂️ АКТИВНЫЕ МАРШРУТЫ ({len(active_routes)})\n\n"
+    message_text += "Выберите маршрут для детального просмотра:"
+    
+    # Преобразуем данные в формат для клавиатуры
+    routes_data = []
+    for route in active_routes:
+        routes_data.append({
+            'route_id': route.session_id,
+            'date': route.start_time.strftime('%d.%m'),
+            'city': route.city_name,
+            'username': route.username,
+            'points_count': route.total_points,
+            'total_containers': route.total_containers,
+            'status': route.status
+        })
+    
+    keyboard = get_admin_route_selection_keyboard(routes_data)
+    
+    await callback.message.edit_text(
+        message_text,
+        reply_markup=keyboard
+    )
+
+
+@admin_router.callback_query(F.data == "routes_completed")
+async def show_completed_routes(callback: CallbackQuery) -> None:
+    """Показывает завершенные маршруты в виде списка для выбора."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    await callback.answer("🔄 Загружаю завершенные маршруты...")
+    
+    completed_routes = await RouteMonitor.get_completed_route_sessions(days=7)
+    
+    if not completed_routes:
+        await callback.message.edit_text(
+            "✅ ЗАВЕРШЕННЫЕ МАРШРУТЫ\n\n"
+            "❌ Завершенных маршрутов за последние 7 дней не найдено.",
+            reply_markup=get_routes_monitoring_keyboard()
+        )
+        return
+    
+    message_text = f"✅ ЗАВЕРШЕННЫЕ МАРШРУТЫ ({len(completed_routes)})\n\n"
+    message_text += "Выберите маршрут для детального просмотра:"
+    
+    # Преобразуем данные в формат для клавиатуры
+    routes_data = []
+    for route in completed_routes[:20]:  # Показываем первые 20
+        routes_data.append({
+            'route_id': route.session_id,
+            'date': route.last_activity.strftime('%d.%m'),
+            'city': route.city_name,
+            'username': route.username,
+            'points_count': route.total_points,
+            'total_containers': route.total_containers,
+            'status': 'completed'
+        })
+    
+    keyboard = get_admin_route_selection_keyboard(routes_data, has_more=(len(completed_routes) > 20))
+    
+    await callback.message.edit_text(
+        message_text,
+        reply_markup=keyboard
+    )
+
+
+@admin_router.callback_query(F.data == "routes_summary")
+async def show_routes_summary(callback: CallbackQuery) -> None:
+    """Показывает общую сводку по маршрутам."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    await callback.answer("🔄 Формирую сводку...")
+    
+    try:
+        # Получаем все данные
+        all_routes = await RouteMonitor.get_active_route_sessions()
+        completed_routes = await RouteMonitor.get_completed_route_sessions(days=7)
+        moscow_routes = await RouteMonitor.get_moscow_routes()
+        cities = await RouteMonitor.get_available_cities()
+        
+        # Группируем по статусам
+        active_count = len([r for r in all_routes if r.status == 'active'])
+        paused_count = len([r for r in all_routes if r.status == 'paused'])
+        inactive_count = len([r for r in all_routes if r.status == 'inactive'])
+        completed_count = len(completed_routes)
+        
+        # Группируем по городам (топ-5)
+        city_stats = {}
+        for route in all_routes + completed_routes:
+            city = route.city_name
+            if city not in city_stats:
+                city_stats[city] = {'count': 0, 'containers': 0}
+            city_stats[city]['count'] += 1
+            city_stats[city]['containers'] += route.total_containers
+        
+        top_cities = sorted(city_stats.items(), key=lambda x: x[1]['count'], reverse=True)[:5]
+        
+        # Формируем сообщение
+        message_text = "📊 <b>СВОДКА ПО МАРШРУТАМ</b>\n\n"
+        
+        message_text += "📈 <b>По статусам:</b>\n"
+        message_text += f"🟢 Активные: {active_count}\n"
+        message_text += f"🟡 Приостановленные: {paused_count}\n"
+        message_text += f"⚪ Неактивные: {inactive_count}\n"
+        message_text += f"✅ Завершенные (7д): {completed_count}\n\n"
+        
+        message_text += f"🚚 <b>Маршруты в Москву:</b> {len(moscow_routes)}\n\n"
+        
+        message_text += "🏙️ <b>Топ городов:</b>\n"
+        for i, (city, stats) in enumerate(top_cities, 1):
+            message_text += f"{i}. {city}: {stats['count']} маршр., {stats['containers']} конт.\n"
+        
+        message_text += f"\n📍 <b>Всего городов:</b> {len(cities)}\n"
+        message_text += f"📦 <b>Всего маршрутов:</b> {len(all_routes) + completed_count}"
+        
+        await callback.message.edit_text(
+            message_text,
+            reply_markup=get_routes_monitoring_keyboard()
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при формировании сводки: {e}")
+        await callback.answer("❌ Ошибка при формировании сводки", show_alert=True)
+
+
+@admin_router.callback_query(F.data == "routes_by_cities")
+async def show_cities_selection(callback: CallbackQuery) -> None:
+    """Показывает выбор городов для просмотра маршрутов."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    cities = await RouteMonitor.get_available_cities()
+    
+    if not cities:
+        await callback.message.edit_text(
+            "🛣️ <b>МАРШРУТЫ ПО ГОРОДАМ</b>\n\n"
+            "❌ Городов с маршрутами не найдено.",
+            reply_markup=get_routes_monitoring_keyboard()
+        )
+        return
+    
+    await callback.message.edit_text(
+        "🛣️ <b>ВЫБЕРИТЕ ГОРОД</b>\n\n"
+        "Выберите город для просмотра маршрутов:",
+        reply_markup=get_city_selection_keyboard(cities)
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("city_routes:"))
+async def show_city_routes(callback: CallbackQuery) -> None:
+    """Показывает маршруты по выбранному городу."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    city_name = callback.data.split(":", 1)[1]
+    await callback.answer(f"🔄 Загружаю маршруты для {city_name}...")
+    
+    city_routes = await RouteMonitor.get_routes_by_city(city_name)
+    
+    if not city_routes:
+        cities = await RouteMonitor.get_available_cities()
+        await callback.message.edit_text(
+            f"📍 <b>МАРШРУТЫ: {city_name.upper()}</b>\n\n"
+            f"❌ Маршрутов в городе {city_name} не найдено.",
+            reply_markup=get_city_selection_keyboard(cities)
+        )
+        return
+    
+    message_text = f"📍 <b>МАРШРУТЫ: {city_name.upper()}</b> ({len(city_routes)})\n\n"
+    message_text += "Выберите маршрут для детального просмотра:"
+    
+    # Преобразуем данные в формат для клавиатуры
+    routes_data = []
+    for route in city_routes[:20]:  # Показываем первые 20
+        routes_data.append({
+            'route_id': route.session_id,
+            'date': route.last_activity.strftime('%d.%m') if route.status == 'completed' else route.start_time.strftime('%d.%m'),
+            'city': route.city_name,
+            'username': route.username,
+            'points_count': route.total_points,
+            'total_containers': route.total_containers,
+            'status': route.status
+        })
+    
+    keyboard = get_admin_route_selection_keyboard(routes_data, has_more=(len(city_routes) > 20))
+    
+    await callback.message.edit_text(
+        message_text,
+        reply_markup=keyboard
+    )
+
+
+@admin_router.callback_query(F.data == "routes_moscow")
+async def show_moscow_routes(callback: CallbackQuery) -> None:
+    """Показывает маршруты в Москву."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    await callback.answer("🔄 Загружаю маршруты в Москву...")
+    
+    moscow_routes = await RouteMonitor.get_moscow_routes()
+    
+    if not moscow_routes:
+        await callback.message.edit_text(
+            "🚚 <b>МАРШРУТЫ В МОСКВУ</b>\n\n"
+            "❌ Маршрутов в Москву не найдено.",
+            reply_markup=get_routes_monitoring_keyboard()
+        )
+        return
+    
+    message_text = f"🚚 <b>МАРШРУТЫ В МОСКВУ</b> ({len(moscow_routes)})\n\n"
+    message_text += "Выберите маршрут для детального просмотра:"
+    
+    # Преобразуем данные в формат для клавиатуры
+    routes_data = []
+    for route in moscow_routes[:20]:  # Показываем первые 20
+        status_emoji = {
+            'available': '🟢',
+            'in_progress': '🟡', 
+            'completed': '✅'
+        }.get(route.status, '⚪')
+        
+        routes_data.append({
+            'route_id': f"moscow_{route.route_id}",  # Префикс для различия
+            'date': route.created_at.strftime('%d.%m'),
+            'city': 'Москва',
+            'username': route.courier_username or 'Не назначен',
+            'points_count': route.points_count,
+            'total_containers': route.total_containers,
+            'status': route.status
+        })
+    
+    keyboard = get_admin_route_selection_keyboard(routes_data, has_more=(len(moscow_routes) > 20))
+    
+    await callback.message.edit_text(
+        message_text,
+        reply_markup=keyboard
+    )
+
+
+@admin_router.callback_query(F.data == "routes_refresh")
+async def refresh_routes_monitoring(callback: CallbackQuery) -> None:
+    """Обновляет данные мониторинга маршрутов."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    await callback.answer("🔄 Обновляю данные...")
+    await callback.message.edit_text(
+        "🛣️ <b>МОНИТОРИНГ МАРШРУТОВ</b>\n\n"
+        "Выберите тип маршрутов для просмотра:",
+        reply_markup=get_routes_monitoring_keyboard()
+    )
+
+
+@admin_router.callback_query(F.data == "routes_close")
+async def close_routes_monitoring(callback: CallbackQuery) -> None:
+    """Закрывает мониторинг маршрутов."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "📊 <b>СТАТИСТИКА</b>\n\n"
+        "Выберите тип статистики:",
+        reply_markup=get_statistics_keyboard()
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "routes_monitoring_back")
+async def back_to_routes_monitoring(callback: CallbackQuery) -> None:
+    """Возвращает в меню мониторинга маршрутов."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "🛣️ <b>МОНИТОРИНГ МАРШРУТОВ</b>\n\n"
+        "Выберите тип маршрутов для просмотра:",
+        reply_markup=get_routes_monitoring_keyboard()
+    )
+    await callback.answer()
+
+
+# ===============================================
+# ОБРАБОТЧИКИ ДЕТАЛЬНОГО ПРОСМОТРА МАРШРУТОВ
+# ===============================================
+
+@admin_router.callback_query(F.data.startswith("admin_route:"))
+async def admin_view_route_details(callback: CallbackQuery) -> None:
+    """
+    Обработчик выбора маршрута для детального просмотра (для админа).
+    """
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    route_hash = callback.data.split(":", 1)[1]
+    
+    # Получаем полный route_id по хешу
+    from keyboards.admin_keyboards import get_route_id_by_hash
+    session_id = get_route_id_by_hash(route_hash)
+    
+    # Проверяем, это маршрут в Москву или обычный маршрут
+    if session_id.startswith("moscow_"):
+        # Это маршрут в Москву
+        moscow_route_id = int(session_id.split("_", 1)[1])
+        await admin_view_moscow_route_details(callback, moscow_route_id)
+        return
+    
+    # Обычный маршрут
+    async for session in get_session():
+        # Получаем все точки этого маршрута по session_id (исключаем итоговые комментарии)
+        from sqlalchemy.orm import selectinload
+        from database.models import RouteProgress
+        
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
+        ).where(
+            and_(
+                RouteProgress.route_session_id == session_id,
+                RouteProgress.notes.notlike('%ИТОГОВЫЙ_КОММЕНТАРИЙ%'),
+                RouteProgress.notes.notlike('%ЛАБОРАТОРНЫЕ_ДАННЫЕ%')
+            )
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        # Показываем первую точку маршрута
+        await admin_show_route_point_details(callback, progresses_list, 0, session_id)
+    
+    await callback.answer()
+
+
+async def admin_view_moscow_route_details(callback: CallbackQuery, moscow_route_id: int) -> None:
+    """
+    Показывает детали маршрута в Москву.
+    """
+    async for session in get_session():
+        from database.models import MoscowRoute, MoscowRoutePoint
+        from sqlalchemy.orm import selectinload
+        
+        from database.models import User
+        
+        stmt = select(MoscowRoute).options(
+            selectinload(MoscowRoute.route_points)
+        ).where(MoscowRoute.id == moscow_route_id)
+        
+        moscow_route = await session.scalar(stmt)
+        
+        if not moscow_route:
+            await callback.answer("❌ Маршрут в Москву не найден", show_alert=True)
+            return
+        
+        # Получаем имя курьера
+        courier_name = "Не назначен"
+        if moscow_route.courier_id:
+            courier = await session.scalar(
+                select(User).where(User.telegram_id == moscow_route.courier_id)
+            )
+            if courier:
+                courier_name = courier.username or f"User_{courier.telegram_id}"
+        
+        # Формируем сообщение с деталями маршрута
+        message_text = f"🚚 <b>МАРШРУТ В МОСКВУ #{moscow_route.id}</b>\n\n"
+        
+        message_text += f"📋 <b>Название:</b> {moscow_route.route_name}\n"
+        message_text += f"👤 <b>Курьер:</b> {courier_name}\n"
+        message_text += f"📊 <b>Статус:</b> {moscow_route.status}\n"
+        message_text += f"📍 <b>Точек:</b> {len(moscow_route.route_points)}\n"
+        message_text += f"🕐 <b>Создан:</b> {moscow_route.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        if moscow_route.started_at:
+            message_text += f"🚀 <b>Начат:</b> {moscow_route.started_at.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        if moscow_route.completed_at:
+            message_text += f"✅ <b>Завершен:</b> {moscow_route.completed_at.strftime('%d.%m.%Y %H:%M')}\n"
+        
+        message_text += f"\n📦 <b>Точки доставки:</b>\n"
+        
+        total_containers = 0
+        for i, point in enumerate(moscow_route.route_points, 1):
+            total_containers += point.containers_to_deliver
+            delivered_containers = point.containers_delivered or 0
+            
+            status_emoji = "✅" if point.status == 'completed' else "⏳"
+            message_text += (
+                f"\n{status_emoji} <b>{i}. {point.organization}</b>\n"
+                f"📍 {point.point_name}\n"
+                f"📦 {delivered_containers}/{point.containers_to_deliver} контейнеров\n"
+            )
+        
+        message_text += f"\n📦 <b>Всего контейнеров:</b> {total_containers}"
+        
+        # Создаем клавиатуру возврата
+        from keyboards.admin_keyboards import get_routes_monitoring_keyboard
+        keyboard = get_routes_monitoring_keyboard()
+        
+        await callback.message.edit_text(
+            message_text,
+            reply_markup=keyboard
+        )
+
+
+async def admin_show_route_point_details(
+    callback: CallbackQuery, 
+    progresses_list: list, 
+    point_index: int, 
+    route_id: str
+) -> None:
+    """
+    Показывает детали конкретной точки маршрута (для админа).
+    """
+    if point_index >= len(progresses_list):
+        await callback.answer("❌ Точка не найдена", show_alert=True)
+        return
+    
+    progress = progresses_list[point_index]
+    route = progress.route
+    photos = progress.photos
+    
+    # Формируем сообщение с деталями точки
+    message_text = f"📍 <b>ТОЧКА {point_index + 1} из {len(progresses_list)}</b>\n\n"
+    
+    message_text += f"🏢 <b>{route.organization}</b>\n"
+    message_text += f"📍 {route.point_name}\n"
+    message_text += f"🏙️ {route.city_name}\n"
+    message_text += f"📍 {route.address}\n\n"
+    
+    message_text += f"📦 <b>Контейнеров:</b> {progress.containers_count}\n"
+    message_text += f"📅 <b>Время:</b> {progress.visited_at.strftime('%d.%m.%Y %H:%M')}\n"
+    message_text += f"📸 <b>Фотографий:</b> {len(photos)}\n"
+    message_text += f"✅ <b>Статус:</b> {progress.status}\n\n"
+    
+    if progress.notes:
+        message_text += f"💬 <b>Комментарий:</b>\n{progress.notes}\n\n"
+    
+    message_text += f"🆔 <b>Сессия:</b> <code>{route_id}</code>"
+    
+    # Проверяем есть ли лабораторные данные
+    has_lab_data = any("ЛАБОРАТОРНЫЕ_ДАННЫЕ" in p.notes or "ИТОГОВЫЙ_КОММЕНТАРИЙ" in p.notes 
+                      for p in progresses_list if p.notes)
+    
+    keyboard = get_admin_route_detail_keyboard(
+        route_id=route_id,
+        current_point_index=point_index,
+        total_points=len(progresses_list),
+        has_photos=len(photos) > 0,
+        has_lab_data=has_lab_data
+    )
+    
+    try:
+        # Проверяем, содержит ли сообщение фото
+        if callback.message.photo:
+            # Если это сообщение с фото, отправляем новое текстовое сообщение
+            await callback.message.answer(
+                text=message_text,
+                reply_markup=keyboard
+            )
+            # Удаляем старое сообщение с фото
+            try:
+                await callback.message.delete()
+            except:
+                pass  # Игнорируем ошибку удаления
+        else:
+            # Если это текстовое сообщение, редактируем его
+            await callback.message.edit_text(
+                text=message_text,
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении сообщения: {e}")
+        logger.error(f"Route ID: {route_id}, Point index: {point_index}, Total points: {len(progresses_list)}")
+        # Fallback: отправляем новое сообщение
+        try:
+            await callback.message.answer(
+                text=message_text,
+                reply_markup=keyboard
+            )
+            await callback.answer("⚠️ Отправлено новое сообщение")
+        except Exception as fallback_error:
+            logger.error(f"Fallback тоже не сработал: {fallback_error}")
+            await callback.answer("❌ Ошибка при загрузке деталей точки")
+
+
+@admin_router.callback_query(F.data.startswith("admin_route_point:"))
+async def admin_navigate_route_point(callback: CallbackQuery) -> None:
+    """
+    Обработчик навигации по точкам маршрута (для админа).
+    """
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("❌ Ошибка в данных", show_alert=True)
+        return
+    
+    route_hash = parts[1]
+    point_index = int(parts[2])
+    
+    # Получаем полный route_id по хешу
+    from keyboards.admin_keyboards import get_route_id_by_hash
+    session_id = get_route_id_by_hash(route_hash)
+    
+    async for session in get_session():
+        # Получаем все точки этого маршрута по session_id
+        from sqlalchemy.orm import selectinload
+        from database.models import RouteProgress
+        
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
+        ).where(
+            and_(
+                RouteProgress.route_session_id == session_id,
+                RouteProgress.notes.notlike('%ИТОГОВЫЙ_КОММЕНТАРИЙ%'),
+                RouteProgress.notes.notlike('%ЛАБОРАТОРНЫЕ_ДАННЫЕ%')
+            )
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        # Показываем выбранную точку
+        await admin_show_route_point_details(callback, progresses_list, point_index, session_id)
+    
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admin_view_photos:"))
+async def admin_view_route_photos(callback: CallbackQuery) -> None:
+    """
+    Обработчик просмотра фотографий точки маршрута (для админа).
+    """
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("❌ Ошибка в данных", show_alert=True)
+        return
+    
+    route_hash = parts[1]
+    point_index = int(parts[2])
+    
+    # Получаем полный route_id по хешу
+    from keyboards.admin_keyboards import get_route_id_by_hash
+    session_id = get_route_id_by_hash(route_hash)
+    
+    async for session in get_session():
+        # Получаем все точки этого маршрута по session_id (исключаем итоговые комментарии)
+        from sqlalchemy.orm import selectinload
+        from database.models import RouteProgress
+        
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.route),
+            selectinload(RouteProgress.photos)
+        ).where(
+            and_(
+                RouteProgress.route_session_id == session_id,
+                RouteProgress.notes.notlike('%ИТОГОВЫЙ_КОММЕНТАРИЙ%'),
+                RouteProgress.notes.notlike('%ЛАБОРАТОРНЫЕ_ДАННЫЕ%')
+            )
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        if point_index >= len(progresses_list):
+            await callback.answer("❌ Точка не найдена", show_alert=True)
+            return
+        
+        progress = progresses_list[point_index]
+        photos = progress.photos
+        
+        if not photos:
+            await callback.answer("❌ Фотографий нет", show_alert=True)
+            return
+        
+        # Показываем первую фотографию
+        await admin_show_route_photo(callback, photos, 0, session_id, point_index)
+    
+    await callback.answer()
+
+
+async def admin_show_route_photo(
+    callback: CallbackQuery, 
+    photos: list, 
+    photo_index: int, 
+    route_id: str, 
+    point_index: int
+) -> None:
+    """
+    Показывает фотографию точки маршрута (для админа).
+    """
+    if photo_index >= len(photos):
+        await callback.answer("❌ Фотография не найдена", show_alert=True)
+        return
+    
+    photo = photos[photo_index]
+    
+    caption = (
+        f"📸 <b>Фото {photo_index + 1} из {len(photos)}</b>\n\n"
+        f"📅 {photo.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"🆔 Сессия: `{route_id}`"
+    )
+    
+    keyboard = get_admin_photos_viewer_keyboard(
+        route_id=route_id,
+        point_index=point_index,
+        current_photo_index=photo_index,
+        total_photos=len(photos)
+    )
+    
+    try:
+        # Если текущее сообщение содержит фото, редактируем медиа
+        if callback.message.photo:
+            await callback.message.edit_media(
+                media=InputMediaPhoto(
+                    media=photo.file_id,
+                    caption=caption
+                ),
+                reply_markup=keyboard
+            )
+        else:
+            # Если это текстовое сообщение, отправляем новое с фото
+            await callback.message.answer_photo(
+                photo=photo.file_id,
+                caption=caption,
+                reply_markup=keyboard
+            )
+            # Удаляем старое текстовое сообщение
+            try:
+                await callback.message.delete()
+            except:
+                pass  # Игнорируем ошибку удаления
+    except Exception as e:
+        logger.error(f"Ошибка при показе фото: {e}")
+        await callback.answer("❌ Ошибка при загрузке фотографии")
+
+
+@admin_router.callback_query(F.data.startswith("admin_photo:"))
+async def admin_navigate_route_photo(callback: CallbackQuery) -> None:
+    """
+    Обработчик навигации по фотографиям точки маршрута (для админа).
+    """
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("❌ Ошибка в данных", show_alert=True)
+        return
+    
+    route_hash = parts[1]
+    point_index = int(parts[2])
+    photo_index = int(parts[3])
+    
+    # Получаем полный route_id по хешу
+    from keyboards.admin_keyboards import get_route_id_by_hash
+    session_id = get_route_id_by_hash(route_hash)
+    
+    async for session in get_session():
+        # Получаем все точки этого маршрута по session_id (исключаем итоговые комментарии)
+        from sqlalchemy.orm import selectinload
+        from database.models import RouteProgress
+        
+        stmt = select(RouteProgress).options(
+            selectinload(RouteProgress.photos)
+        ).where(
+            and_(
+                RouteProgress.route_session_id == session_id,
+                RouteProgress.notes.notlike('%ИТОГОВЫЙ_КОММЕНТАРИЙ%'),
+                RouteProgress.notes.notlike('%ЛАБОРАТОРНЫЕ_ДАННЫЕ%')
+            )
+        ).order_by(RouteProgress.visited_at)
+        
+        progresses = await session.scalars(stmt)
+        progresses_list = progresses.all()
+        
+        if not progresses_list:
+            await callback.answer("❌ Маршрут не найден", show_alert=True)
+            return
+        
+        if point_index >= len(progresses_list):
+            await callback.answer("❌ Точка не найдена", show_alert=True)
+            return
+        
+        progress = progresses_list[point_index]
+        photos = progress.photos
+        
+        if not photos:
+            await callback.answer("❌ Фотографий нет", show_alert=True)
+            return
+        
+        # Показываем выбранную фотографию
+        await admin_show_route_photo(callback, photos, photo_index, session_id, point_index)
+    
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "admin_back_to_routes")
+async def admin_back_to_routes(callback: CallbackQuery) -> None:
+    """Возвращает к списку маршрутов."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ У вас нет доступа к этой функции.", show_alert=True)
+        return
+    
+    # Возвращаемся в главное меню мониторинга
+    await callback.message.edit_text(
+        "🛣️ <b>МОНИТОРИНГ МАРШРУТОВ</b>\n\n"
+        "Выберите тип маршрутов для просмотра:",
+        reply_markup=get_routes_monitoring_keyboard()
+    )
+    await callback.answer()

@@ -1570,32 +1570,61 @@ async def get_user_routes_with_pagination(user_id: int, limit: int = 10, offset:
         routes_summary = {}
         for route_progress in routes_list:
             session_id = route_progress.route_session_id
-            date = route_progress.visited_at.strftime("%d.%m.%Y")
-            city = route_progress.route.city_name
             
+            # Пропускаем итоговые комментарии при группировке
+            if (route_progress.notes and 
+                ('ИТОГОВЫЙ_КОММЕНТАРИЙ' in route_progress.notes or 
+                 'ЛАБОРАТОРНЫЕ_ДАННЫЕ' in route_progress.notes)):
+                continue
+                
             # Используем session_id как ключ для группировки
             if session_id not in routes_summary:
-                # Находим время первой точки этого маршрута
-                first_time = min(p.visited_at for p in routes_list if p.route_session_id == session_id)
-                time_start = first_time.strftime("%H:%M")
-                
                 routes_summary[session_id] = {
                     'route_id': session_id,
-                    'date': date,
-                    'city': city,
-                    'time_start': time_start,
-                    'first_time': first_time,  # Для сортировки
-                    'progresses': []
+                    'progresses': [],
+                    'cities': {}  # Для подсчета городов
                 }
             
             routes_summary[session_id]['progresses'].append(route_progress)
+            
+            # Подсчитываем города в сессии
+            city = route_progress.route.city_name
+            if city not in routes_summary[session_id]['cities']:
+                routes_summary[session_id]['cities'][city] = 0
+            routes_summary[session_id]['cities'][city] += 1
         
-        # Сортируем точки в каждом маршруте по времени
+        # Определяем основной город для каждой сессии и время
+        for session_id, route_info in routes_summary.items():
+            if not route_info['progresses']:
+                continue
+                
+            # Определяем город по большинству точек
+            main_city = max(route_info['cities'].items(), key=lambda x: x[1])[0]
+            
+            # Находим время первой точки этого маршрута
+            first_time = min(p.visited_at for p in route_info['progresses'])
+            date = first_time.strftime("%d.%m.%Y")
+            time_start = first_time.strftime("%H:%M")
+            
+            route_info.update({
+                'date': date,
+                'city': main_city,
+                'time_start': time_start,
+                'first_time': first_time
+            })
+            
+            # Удаляем временные данные
+            del route_info['cities']
+        
+        # Фильтруем пустые сессии и сортируем точки в каждом маршруте по времени
+        valid_routes = []
         for route_info in routes_summary.values():
-            route_info['progresses'].sort(key=lambda x: x.visited_at)
+            if route_info['progresses']:  # Только непустые маршруты
+                route_info['progresses'].sort(key=lambda x: x.visited_at)
+                valid_routes.append(route_info)
         
         # Сортируем сами маршруты по времени первой точки (новые сверху)
-        sorted_routes = sorted(routes_summary.values(), key=lambda x: x['first_time'], reverse=True)
+        sorted_routes = sorted(valid_routes, key=lambda x: x['first_time'], reverse=True)
         
         # Применяем пагинацию
         total_count = len(sorted_routes)
@@ -1917,7 +1946,7 @@ async def show_route_photo(
     caption = f"📸 Фотография {photo_index + 1} из {len(photos)}"
     
     await callback.message.answer_photo(
-        photo=photo.photo_file_id,
+        photo=photo.file_id,
         caption=caption,
         reply_markup=keyboard
     )
@@ -2866,7 +2895,7 @@ async def show_lab_photo(
         
         # Отправляем фотографию
         await callback.message.answer_photo(
-            photo=photo.photo_file_id,
+            photo=photo.file_id,
             caption=caption,
             reply_markup=keyboard
         )
